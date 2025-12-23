@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: bot-converter-redis
+    env_file:
+      - ./config.env
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: ["sh", "-c", ": \"$${REDIS_PASSWORD:?REDIS_PASSWORD is required}\"; redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    healthcheck:
+      test: ["CMD-SHELL", ": \"$${REDIS_PASSWORD:?REDIS_PASSWORD is required}\"; redis-cli -a \"$$REDIS_PASSWORD\" ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bot-network
+
+  bot-converter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bot-converter-app
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file:
+      - ./config.env
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+    restart: unless-stopped
+    volumes:
+      - converter_temp:/app/temp
+    networks:
+      - bot-network
+
+volumes:
+  redis_data:
+  converter_temp:
+
+networks:
+  bot-network:
+    driver: bridge
+
