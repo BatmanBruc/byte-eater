@@ -53,7 +53,13 @@ func main() {
 
 	taskStore := store.NewTaskStore(rdb, 24)
 
-	middlewares := middleware.NewMessageAnalyzer(taskStore)
+	pgStore, err := store.NewPostgresStore(ctx, os.Getenv("POSTGRES_DSN"))
+	if err != nil {
+		log.Fatalf("Failed to connect to Postgres: %v", err)
+	}
+	defer pgStore.Close()
+
+	middlewares := middleware.NewMessageAnalyzer(taskStore, pgStore)
 
 	var h *handlers.Handlers
 
@@ -79,7 +85,7 @@ func main() {
 		},
 	)
 
-	h = handlers.NewHandlers(taskStore, taskScheduler)
+	h = handlers.NewHandlers(taskStore, taskScheduler, pgStore, pgStore)
 
 	taskScheduler.Start()
 	defer taskScheduler.Stop()
@@ -95,6 +101,10 @@ func main() {
 	}, handlerChain)
 
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "", bot.MatchTypePrefix, handlerChain)
+
+	b.RegisterHandlerMatchFunc(func(update *models.Update) bool {
+		return update.PreCheckoutQuery != nil
+	}, handlerChain)
 
 	log.Println("Bot started. Press Ctrl+C to stop.")
 	b.Start(ctx)

@@ -6,6 +6,7 @@ type messageTypeKey struct{}
 type filesInfoKey struct{}
 type sessionIDKey struct{}
 type callbackDataKey struct{}
+type langKey struct{}
 
 type MessageType string
 
@@ -23,6 +24,8 @@ const (
 	MessageTypeUnknown     MessageType = "unknown"
 	MessageTypeCommand     MessageType = "command"
 	MessageTypeClickButton MessageType = "ckickButton"
+	MessageTypePreCheckout MessageType = "preCheckout"
+	MessageTypePayment     MessageType = "payment"
 )
 
 type FileInfo struct {
@@ -110,6 +113,18 @@ func WithCallbackData(ctx context.Context, data string) context.Context {
 
 func GetCallbackData(ctx context.Context) (string, bool) {
 	v := ctx.Value(callbackDataKey{})
+	if v == nil {
+		return "", false
+	}
+	return v.(string), true
+}
+
+func WithLang(ctx context.Context, lang string) context.Context {
+	return context.WithValue(ctx, langKey{}, lang)
+}
+
+func GetLang(ctx context.Context) (string, bool) {
+	v := ctx.Value(langKey{})
 	if v == nil {
 		return "", false
 	}

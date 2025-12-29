@@ -48,9 +48,6 @@ func (c *DefaultConverter) Convert(ctx context.Context, botClient *bot.Bot, file
 
 	fileURL := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", botClient.Token(), fileInfo.FilePath)
 
-	// ВАЖНО:
-	// - Используем один nonce для обоих имён, чтобы избежать коллизий при вызовах в одну и ту же секунду.
-	// - Гарантируем, что originalPath и resultPath НИКОГДА не равны (иначе копирование может обнулить файл до 0 байт).
 	nonce := time.Now().UnixNano()
 	originalPath := filepath.Join(c.tempDir, fmt.Sprintf("%s_%d_original.%s", fileID, nonce, originalExt))
 	resultPath := filepath.Join(c.tempDir, fmt.Sprintf("%s_%d_result.%s", fileID, nonce, targetExt))
@@ -132,6 +129,14 @@ func (c *DefaultConverter) convertFile(ctx context.Context, inputPath, outputPat
 		return c.convertAudio(ctx, inputPath, outputPath, originalExt, targetExt)
 	}
 
+	if c.isVideoFormat(originalExt) && c.isAudioFormat(targetExt) {
+		return c.convertVideoToAudio(ctx, inputPath, outputPath)
+	}
+
+	if c.isVideoFormat(originalExt) && targetExt == "gif" {
+		return c.convertVideoToGif(ctx, inputPath, outputPath)
+	}
+
 	if c.isVideoFormat(originalExt) && c.isVideoFormat(targetExt) {
 		return c.convertVideo(ctx, inputPath, outputPath, originalExt, targetExt)
 	}
@@ -152,7 +157,6 @@ func (c *DefaultConverter) convertFile(ctx context.Context, inputPath, outputPat
 }
 
 func (c *DefaultConverter) copyFile(src, dst string) error {
-	// Защита от "копирования файла в самого себя", которое может обнулить файл до 0 байт.
 	if filepath.Clean(src) == filepath.Clean(dst) {
 		return nil
 	}
@@ -219,7 +223,7 @@ func (c *DefaultConverter) convertVideo(ctx context.Context, inputPath, outputPa
 		return fmt.Errorf("ffmpeg не установлен")
 	}
 
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-i", inputPath, "-c:v", "libx264", "-c:a", "aac", "-y", outputPath)
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-i", inputPath, "-y", outputPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ошибка ffmpeg: %v, вывод: %s", err, string(output))
@@ -228,9 +232,34 @@ func (c *DefaultConverter) convertVideo(ctx context.Context, inputPath, outputPa
 	return nil
 }
 
+func (c *DefaultConverter) convertVideoToAudio(ctx context.Context, inputPath, outputPath string) error {
+	if !c.hasCommand("ffmpeg") {
+		return fmt.Errorf("ffmpeg не установлен")
+	}
+
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-i", inputPath, "-vn", "-y", outputPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ошибка ffmpeg (video->audio): %v, вывод: %s", err, string(output))
+	}
+	return nil
+}
+
+func (c *DefaultConverter) convertVideoToGif(ctx context.Context, inputPath, outputPath string) error {
+	if !c.hasCommand("ffmpeg") {
+		return fmt.Errorf("ffmpeg не установлен")
+	}
+
+	filter := "fps=12,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-i", inputPath, "-vf", filter, "-loop", "0", "-y", outputPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ошибка ffmpeg (video->gif): %v, вывод: %s", err, string(output))
+	}
+	return nil
+}
+
 func (c *DefaultConverter) convertDocument(ctx context.Context, inputPath, outputPath string, originalExt, targetExt string) error {
-	// Конвертация документов и текста через LibreOffice.
-	// Поддержка: office/odt/rtf/txt -> office/pdf/rtf/txt (а одинаковое расширение обрабатывается ранее как копирование).
 	if (c.isOfficeFormat(originalExt) || originalExt == "odt" || originalExt == "rtf" || originalExt == "txt") &&
 		(c.isOfficeFormat(targetExt) || targetExt == "pdf" || targetExt == "rtf" || targetExt == "txt") {
 		if c.hasCommand("libreoffice") || c.hasCommand("soffice") {
@@ -259,9 +288,6 @@ func (c *DefaultConverter) libreOfficeConvertToArg(targetExt string) (convertTo 
 		return "", "", fmt.Errorf("пустой целевой формат для LibreOffice")
 	}
 
-	// Для некоторых форматов LibreOffice требует указания фильтра.
-	// Пример: txt лучше конвертировать через "txt:Text", иначе на части версий
-	// конвертация может падать или выдавать неожиданный формат.
 	switch targetExt {
 	case "txt":
 		return "txt:Text", "txt", nil
@@ -291,17 +317,14 @@ func (c *DefaultConverter) convertWithLibreOffice(ctx context.Context, inputPath
 	baseName := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
 	generated := filepath.Join(outputDir, baseName+"."+expectedExt)
 	if _, err := os.Stat(generated); os.IsNotExist(err) {
-		// Некоторые версии LibreOffice могут создавать файлы с расширением в верхнем регистре.
 		generatedAlt := filepath.Join(outputDir, baseName+"."+strings.ToUpper(expectedExt))
 		if _, err2 := os.Stat(generatedAlt); err2 == nil {
 			generated = generatedAlt
 		} else {
-			return fmt.Errorf("LibreOffice не создал файл: %s", generated)
+			return fmt.Errorf("LibreOffice не создал файл: %s\nвывод: %s", generated, string(output))
 		}
 	}
 
-	// LibreOffice обычно пишет файл напрямую в outputDir; если он создал файл ровно по outputPath,
-	// нельзя копировать "в самого себя" (это обнулит файл до 0 байт).
 	if filepath.Clean(generated) == filepath.Clean(outputPath) {
 		return nil
 	}

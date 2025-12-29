@@ -19,6 +19,23 @@ services:
     networks:
       - bot-network
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: bot-converter-postgres
+    env_file:
+      - ./config.env
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bot-network
+
   bot-converter:
     build:
       context: .
@@ -26,6 +43,8 @@ services:
     container_name: bot-converter-app
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     env_file:
       - ./config.env
@@ -42,6 +61,7 @@ services:
 volumes:
   redis_data:
   converter_temp:
+  postgres_data:
 
 networks:
   bot-network:

@@ -2,9 +2,12 @@ package formats
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
+	"github.com/BatmanBruc/bat-bot-convetor/internal/i18n"
 	"github.com/BatmanBruc/bat-bot-convetor/internal/messages"
+	"github.com/BatmanBruc/bat-bot-convetor/internal/pricing"
 )
 
 type FormatCategory struct {
@@ -18,8 +21,180 @@ type FormatButton struct {
 	CallbackData string
 }
 
-// GetFormatButtonsByList формирует кнопки inline-клавиатуры из явного списка форматов.
-// Форматы показываются как есть, а callback data имеет вид "<lowercase_format>_for_<taskID>".
+func normalizeExt(ext string) string {
+	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(ext), "."))
+}
+
+func uniqUpper(formats []string) []string {
+	seen := make(map[string]struct{}, len(formats))
+	out := make([]string, 0, len(formats))
+	for _, f := range formats {
+		f = strings.ToUpper(strings.TrimSpace(f))
+		if f == "" {
+			continue
+		}
+		if _, ok := seen[f]; ok {
+			continue
+		}
+		seen[f] = struct{}{}
+		out = append(out, f)
+	}
+	return out
+}
+
+func withoutSameExt(targets []string, sourceExt string) []string {
+	sourceExt = normalizeExt(sourceExt)
+	if sourceExt == "" {
+		return targets
+	}
+	out := make([]string, 0, len(targets))
+	for _, t := range targets {
+		if normalizeExt(t) == sourceExt {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+func imageFormats() []string {
+	return SupportedFormats["images"][0].Formats
+}
+
+func audioFormats() []string {
+	return SupportedFormats["audio"][0].Formats
+}
+
+func videoFormats() []string {
+	return SupportedFormats["video"][0].Formats
+}
+
+func ebookFormats() []string {
+	return SupportedFormats["ebook"][0].Formats
+}
+
+func officeFormats() []string {
+	return append(append(append([]string{}, writerFormats()...), sheetFormats()...), slideFormats()...)
+}
+
+func writerFormats() []string {
+	return []string{"DOC", "DOCX", "ODT", "RTF", "TXT"}
+}
+
+func sheetFormats() []string {
+	return []string{"XLS", "XLSX", "ODS"}
+}
+
+func slideFormats() []string {
+	return []string{"PPT", "PPTX", "PPTM", "PPS", "PPSX", "PPSM", "POT", "POTX", "POTM", "ODP"}
+}
+
+func containsCaseInsensitive(list []string, item string) bool {
+	item = normalizeExt(item)
+	for _, v := range list {
+		if normalizeExt(v) == item {
+			return true
+		}
+	}
+	return false
+}
+
+func GetTargetFormatsForSourceExt(sourceExt string) []string {
+	sourceExt = normalizeExt(sourceExt)
+	if sourceExt == "" {
+		return nil
+	}
+
+	switch {
+	case containsCaseInsensitive(imageFormats(), sourceExt):
+		targets := uniqUpper(imageFormats())
+		targets = withoutSameExt(targets, sourceExt)
+		sort.Strings(targets)
+		return targets
+
+	case containsCaseInsensitive(audioFormats(), sourceExt):
+		targets := uniqUpper(audioFormats())
+		targets = withoutSameExt(targets, sourceExt)
+		sort.Strings(targets)
+		return targets
+
+	case containsCaseInsensitive(videoFormats(), sourceExt):
+		targets := append([]string{}, videoFormats()...)
+		targets = append(targets, audioFormats()...)
+		targets = append(targets, "GIF")
+		targets = uniqUpper(targets)
+		targets = withoutSameExt(targets, sourceExt)
+		sort.Strings(targets)
+		return targets
+
+	case containsCaseInsensitive(ebookFormats(), sourceExt):
+		targets := append([]string{}, ebookFormats()...)
+		targets = append(targets, "PDF")
+		targets = uniqUpper(targets)
+		targets = withoutSameExt(targets, sourceExt)
+		sort.Strings(targets)
+		return targets
+	}
+
+	if sourceExt == "pdf" {
+		return []string{"TXT"}
+	}
+
+	if containsCaseInsensitive(writerFormats(), sourceExt) {
+		targets := append([]string{}, writerFormats()...)
+		targets = append(targets, "PDF")
+		targets = uniqUpper(targets)
+		targets = withoutSameExt(targets, sourceExt)
+		sort.Strings(targets)
+		return targets
+	}
+
+	if containsCaseInsensitive(sheetFormats(), sourceExt) {
+		targets := append([]string{}, sheetFormats()...)
+		targets = append(targets, "PDF")
+		targets = uniqUpper(targets)
+		targets = withoutSameExt(targets, sourceExt)
+		sort.Strings(targets)
+		return targets
+	}
+
+	if containsCaseInsensitive(slideFormats(), sourceExt) {
+		targets := append([]string{}, slideFormats()...)
+		targets = append(targets, "PDF")
+		targets = uniqUpper(targets)
+		targets = withoutSameExt(targets, sourceExt)
+		sort.Strings(targets)
+		return targets
+	}
+
+	return nil
+}
+
+func GetFormatButtonsBySourceExt(sourceExt string, taskID string) []FormatButton {
+	return GetFormatButtonsByList(GetTargetFormatsForSourceExt(sourceExt), taskID)
+}
+
+func GetFormatButtonsBySourceExtWithCredits(sourceExt string, taskID string, fileSize int64) []FormatButton {
+	targets := GetTargetFormatsForSourceExt(sourceExt)
+	buttons := make([]FormatButton, 0, len(targets))
+	for _, t := range targets {
+		credits, heavy := pricing.Credits(sourceExt, t, fileSize)
+		text := t
+		if credits > 0 {
+			if heavy {
+				text = t + " " + "★" + " " + fmt.Sprintf("(%d)", credits)
+			} else {
+				text = t + " " + fmt.Sprintf("(%d)", credits)
+			}
+		}
+		buttons = append(buttons, FormatButton{
+			Text:         text,
+			CallbackData: strings.ToLower(t) + "_for_" + taskID,
+		})
+	}
+	return buttons
+}
+
 func GetFormatButtonsByList(formatList []string, taskID string) []FormatButton {
 	buttons := make([]FormatButton, 0, len(formatList))
 	for _, format := range formatList {
@@ -36,9 +211,7 @@ func GetFormatButtonsByList(formatList []string, taskID string) []FormatButton {
 	return buttons
 }
 
-// GetTextOutputButtons возвращает кнопки форматов вывода для сценария "текстовое сообщение -> файл".
 func GetTextOutputButtons(taskID string) []FormatButton {
-	// Держим список консервативным: форматы, которые LibreOffice обычно генерирует стабильно.
 	return GetFormatButtonsByList([]string{"TXT", "PDF", "DOCX", "RTF", "ODT"}, taskID)
 }
 
@@ -170,9 +343,9 @@ func GetFormatButtonsByCategory(category string, taskID string) []FormatButton {
 	return GetFormatButtonsByList(formats, taskID)
 }
 
-func GetHelpMessage() string {
+func GetHelpMessage(lang i18n.Lang) string {
 	var msg strings.Builder
-	msg.WriteString(messages.HelpHeader())
+	msg.WriteString(messages.HelpHeader(lang))
 	msg.WriteString("\n")
 
 	categories := []struct {
@@ -197,11 +370,22 @@ func GetHelpMessage() string {
 		}
 	}
 
-	msg.WriteString("🧭 <b>Использование</b>\n")
-	msg.WriteString("1) Отправьте файл или текст\n")
-	msg.WriteString("2) Выберите целевой формат в кнопках\n")
-	msg.WriteString("3) Дождитесь результата\n\n")
-	msg.WriteString("Пример: <code>.docx → PDF</code>")
+	if lang == i18n.RU {
+		msg.WriteString("🧭 <b>Использование</b>\n")
+		msg.WriteString("1) Отправьте файл/текст (также можно войсы и кружки)\n")
+		msg.WriteString("2) Выберите целевой формат в кнопках (список зависит от исходного формата)\n")
+		msg.WriteString("3) Дождитесь результата\n\n")
+		msg.WriteString("Примеры:\n")
+	} else {
+		msg.WriteString("🧭 <b>How to use</b>\n")
+		msg.WriteString("1) Send a file/text (voice messages and video notes also work)\n")
+		msg.WriteString("2) Choose the target format from buttons (options depend on the source format)\n")
+		msg.WriteString("3) Wait for the result\n\n")
+		msg.WriteString("Examples:\n")
+	}
+	msg.WriteString("• <code>.docx → PDF/TXT</code>\n")
+	msg.WriteString("• <code>.pdf → TXT</code>\n")
+	msg.WriteString("• <code>.mp4 → avi/mkv</code>")
 
 	return msg.String()
 }

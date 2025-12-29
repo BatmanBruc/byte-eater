@@ -290,7 +290,7 @@ func (s *RedisTaskStore) SetWaitingFile(sessionID string, targetExt string) (*ty
 	return session, nil
 }
 
-func (s *RedisTaskStore) SetProcessingFile(sessionID string, fileID, fileName string) (*types.Task, error) {
+func (s *RedisTaskStore) SetProcessingFile(sessionID string, fileID, fileName string, fileSize int64) (*types.Task, error) {
 	session, err := s.GetSession(sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("session not found: %v", err)
@@ -304,6 +304,9 @@ func (s *RedisTaskStore) SetProcessingFile(sessionID string, fileID, fileName st
 		FileName:    fileName,
 		TargetExt:   "",
 		OriginalExt: getFileExtension(fileName),
+		Options: map[string]interface{}{
+			"file_size": fileSize,
+		},
 	}
 
 	if err := s.CreateTask(task); err != nil {

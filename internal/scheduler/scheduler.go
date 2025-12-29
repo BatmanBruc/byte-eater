@@ -6,12 +6,15 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/BatmanBruc/bat-bot-convetor/internal/converter"
+	"github.com/BatmanBruc/bat-bot-convetor/internal/i18n"
 	"github.com/BatmanBruc/bat-bot-convetor/internal/messages"
+	"github.com/BatmanBruc/bat-bot-convetor/internal/pricing"
 	"github.com/BatmanBruc/bat-bot-convetor/types"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -27,9 +30,11 @@ type Scheduler struct {
 	wg         sync.WaitGroup
 	mu         sync.Mutex
 	running    bool
-	taskQueue  chan string
+	taskQueueP chan string
+	taskQueueN chan string
 	inFlight   map[string]*inFlightEntry
 	inFlightMu sync.RWMutex
+	heavySem   chan struct{}
 }
 
 type inFlightEntry struct {
@@ -37,6 +42,7 @@ type inFlightEntry struct {
 	messageID int
 	position  int
 	fileName  string
+	lang      i18n.Lang
 }
 
 type Config struct {
@@ -56,15 +62,17 @@ func NewScheduler(store types.TaskStore, converter converter.Converter, botClien
 	}
 
 	return &Scheduler{
-		store:     store,
-		converter: converter,
-		botClient: botClient,
-		workers:   config.Workers,
-		ctx:       ctx,
-		cancel:    cancel,
-		running:   false,
-		taskQueue: make(chan string, queueSize),
-		inFlight:  make(map[string]*inFlightEntry),
+		store:      store,
+		converter:  converter,
+		botClient:  botClient,
+		workers:    config.Workers,
+		ctx:        ctx,
+		cancel:     cancel,
+		running:    false,
+		taskQueueP: make(chan string, queueSize),
+		taskQueueN: make(chan string, queueSize),
+		inFlight:   make(map[string]*inFlightEntry),
+		heavySem:   make(chan struct{}, 1),
 	}
 }
 
@@ -108,13 +116,42 @@ func (s *Scheduler) recoverProcessingTasks() {
 			skipped++
 			continue
 		}
-		s.EnqueueTask(task.ID, 0, 0, task.FileName)
+		s.EnqueueTask(task.ID, 0, 0, task.FileName, langFromTask(task), priorityFromTask(task))
 		enqueued++
 	}
 
 	if enqueued > 0 || skipped > 0 {
 		log.Printf("Scheduler recovery: enqueued=%d skipped=%d (processing tasks=%d)", enqueued, skipped, len(tasks))
 	}
+}
+
+func priorityFromTask(task *types.Task) bool {
+	if task == nil || task.Options == nil {
+		return false
+	}
+	if v, ok := task.Options["priority"]; ok {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	if v, ok := task.Options["unlimited"]; ok {
+		if b, ok := v.(bool); ok && b {
+			return true
+		}
+	}
+	return false
+}
+
+func langFromTask(task *types.Task) i18n.Lang {
+	if task == nil || task.Options == nil {
+		return i18n.EN
+	}
+	if v, ok := task.Options["lang"]; ok {
+		if s, ok := v.(string); ok {
+			return i18n.Parse(s)
+		}
+	}
+	return i18n.EN
 }
 
 func (s *Scheduler) Stop() {
@@ -132,7 +169,7 @@ func (s *Scheduler) Stop() {
 	log.Println("Scheduler stopped")
 }
 
-func (s *Scheduler) EnqueueTask(taskID string, chatID int64, messageID int, fileName string) int {
+func (s *Scheduler) EnqueueTask(taskID string, chatID int64, messageID int, fileName string, lang i18n.Lang, priority bool) int {
 	s.inFlightMu.Lock()
 	if _, exists := s.inFlight[taskID]; exists {
 		s.inFlightMu.Unlock()
@@ -164,12 +201,18 @@ func (s *Scheduler) EnqueueTask(taskID string, chatID int64, messageID int, file
 		messageID: messageID,
 		position:  position,
 		fileName:  fileName,
+		lang:      lang,
 	}
 	s.inFlightMu.Unlock()
 
 	go func() {
 		select {
-		case s.taskQueue <- taskID:
+		case func() chan string {
+			if priority {
+				return s.taskQueueP
+			}
+			return s.taskQueueN
+		}() <- taskID:
 		case <-s.ctx.Done():
 			s.inFlightMu.Lock()
 			delete(s.inFlight, taskID)
@@ -186,49 +229,116 @@ func (s *Scheduler) worker(id int) {
 	log.Printf("Worker %d started", id)
 
 	for {
+		var taskID string
 		select {
 		case <-s.ctx.Done():
 			log.Printf("Worker %d stopped", id)
 			return
-		case taskID := <-s.taskQueue:
-			log.Println(taskID, id)
+		case taskID = <-s.taskQueueP:
+		default:
+			select {
+			case <-s.ctx.Done():
+				log.Printf("Worker %d stopped", id)
+				return
+			case taskID = <-s.taskQueueP:
+			case taskID = <-s.taskQueueN:
+			}
+		}
 
-			task, err := s.store.GetTask(taskID)
-			if err != nil {
-				log.Printf("Worker %d: error getting task %s: %v", id, taskID, err)
+		if strings.TrimSpace(taskID) == "" {
+			continue
+		}
+
+		task, err := s.store.GetTask(taskID)
+		if err != nil {
+			log.Printf("Worker %d: error getting task %s: %v", id, taskID, err)
+			s.inFlightMu.Lock()
+			delete(s.inFlight, taskID)
+			s.inFlightMu.Unlock()
+			continue
+		}
+
+		isHeavy := s.isHeavyTask(task)
+		if isHeavy {
+			select {
+			case s.heavySem <- struct{}{}:
+			case <-s.ctx.Done():
 				s.inFlightMu.Lock()
 				delete(s.inFlight, taskID)
 				s.inFlightMu.Unlock()
-				continue
+				return
 			}
+		}
+
+		func() {
+			defer func() {
+				if isHeavy {
+					<-s.heavySem
+				}
+			}()
 
 			if err := s.processTask(task); err != nil {
 				log.Printf("Worker %d: error processing task %s: %v", id, taskID, err)
 			}
+		}()
 
-			var entry *inFlightEntry
-			s.inFlightMu.RLock()
-			entry = s.inFlight[taskID]
-			s.inFlightMu.RUnlock()
-			if entry != nil && entry.chatID != 0 && entry.messageID != 0 {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				_, err := s.botClient.DeleteMessage(ctx, &bot.DeleteMessageParams{
-					ChatID:    entry.chatID,
-					MessageID: entry.messageID,
-				})
-				cancel()
-				if err != nil {
-					log.Printf("Failed to delete status message chat=%d msg=%d: %v", entry.chatID, entry.messageID, err)
+		var entry *inFlightEntry
+		s.inFlightMu.RLock()
+		entry = s.inFlight[taskID]
+		s.inFlightMu.RUnlock()
+		if entry != nil && entry.chatID != 0 && entry.messageID != 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_, err := s.botClient.DeleteMessage(ctx, &bot.DeleteMessageParams{
+				ChatID:    entry.chatID,
+				MessageID: entry.messageID,
+			})
+			cancel()
+			if err != nil {
+				log.Printf("Failed to delete status message chat=%d msg=%d: %v", entry.chatID, entry.messageID, err)
+			}
+		}
+
+		s.inFlightMu.Lock()
+		delete(s.inFlight, taskID)
+		s.inFlightMu.Unlock()
+
+		go s.decrementQueueAndUpdateMessages()
+	}
+}
+
+func (s *Scheduler) isHeavyTask(task *types.Task) bool {
+	if task == nil {
+		return false
+	}
+
+	fileSize := int64(0)
+	if task.Options != nil {
+		if v, ok := task.Options["is_heavy"]; ok {
+			switch t := v.(type) {
+			case bool:
+				return t
+			case string:
+				return strings.EqualFold(strings.TrimSpace(t), "true")
+			}
+		}
+		if v, ok := task.Options["file_size"]; ok {
+			switch t := v.(type) {
+			case int64:
+				fileSize = t
+			case int:
+				fileSize = int64(t)
+			case float64:
+				fileSize = int64(t)
+			case string:
+				if n, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64); err == nil {
+					fileSize = n
 				}
 			}
-
-			s.inFlightMu.Lock()
-			delete(s.inFlight, taskID)
-			s.inFlightMu.Unlock()
-
-			go s.decrementQueueAndUpdateMessages()
 		}
 	}
+
+	_, heavy := pricing.Credits(task.OriginalExt, task.TargetExt, fileSize)
+	return heavy
 }
 
 func (s *Scheduler) decrementQueueAndUpdateMessages() {
@@ -264,13 +374,13 @@ func (s *Scheduler) decrementQueueAndUpdateMessages() {
 			updates = append(updates, upd{
 				chatID:    entry.chatID,
 				messageID: entry.messageID,
-				text:      messages.QueueStarted(name),
+				text:      messages.QueueStarted(entry.lang, name),
 			})
 		} else {
 			updates = append(updates, upd{
 				chatID:    entry.chatID,
 				messageID: entry.messageID,
-				text:      messages.QueueQueued(name, entry.position),
+				text:      messages.QueueQueued(entry.lang, name, entry.position),
 			})
 		}
 	}
@@ -306,6 +416,7 @@ func (s *Scheduler) processTask(task *types.Task) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	lang := langFromTask(task)
 
 	resultPath, outName, err := s.converter.Convert(ctx, s.botClient, task.FileID, task.OriginalExt, task.TargetExt, task.FileName)
 	if err != nil {
@@ -315,14 +426,15 @@ func (s *Scheduler) processTask(task *types.Task) error {
 
 		s.botClient.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    session.ChatID,
-			Text:      messages.ErrorConversionFailed(task.FileName, err),
+			Text:      messages.ErrorConversionFailed(lang, task.FileName, err),
 			ParseMode: messages.ParseModeHTML,
 		})
 
 		return err
 	}
 
-	msg, err := s.sendDocumentFromPath(ctx, session.ChatID, resultPath, outName)
+	caption := s.resultCaption(task, outName)
+	msg, err := s.sendDocumentFromPath(ctx, session.ChatID, resultPath, outName, caption)
 	if err != nil {
 		log.Printf("Error sending document: %v", err)
 		_ = os.Remove(resultPath)
@@ -349,7 +461,48 @@ func (s *Scheduler) processTask(task *types.Task) error {
 	return nil
 }
 
-func (s *Scheduler) sendDocumentFromPath(ctx context.Context, chatID int64, filePath string, fileName string) (*models.Message, error) {
+func (s *Scheduler) resultCaption(task *types.Task, fileName string) string {
+	caption := strings.TrimSpace(fileName)
+	if caption == "" {
+		caption = "result"
+	}
+	if task == nil || task.Options == nil {
+		return caption
+	}
+	lang := langFromTask(task)
+
+	unlimited := false
+	if v, ok := task.Options["unlimited"]; ok {
+		if b, ok := v.(bool); ok {
+			unlimited = b
+		}
+	}
+	if unlimited {
+		return caption + "\n\n" + messages.PlanUnlimitedLine(lang)
+	}
+
+	rem := 0
+	ok := false
+	if v, exists := task.Options["credits_remaining"]; exists {
+		switch t := v.(type) {
+		case int:
+			rem = t
+			ok = true
+		case int64:
+			rem = int(t)
+			ok = true
+		case float64:
+			rem = int(t)
+			ok = true
+		}
+	}
+	if ok {
+		return caption + "\n\n" + messages.CreditsRemainingLine(lang, rem)
+	}
+	return caption
+}
+
+func (s *Scheduler) sendDocumentFromPath(ctx context.Context, chatID int64, filePath string, fileName string, caption string) (*models.Message, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, err
@@ -366,7 +519,7 @@ func (s *Scheduler) sendDocumentFromPath(ctx context.Context, chatID int64, file
 			Filename: fileName,
 			Data:     file,
 		},
-		Caption: fileName,
+		Caption: caption,
 	})
 	return msg, err
 }

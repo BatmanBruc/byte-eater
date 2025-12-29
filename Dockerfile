@@ -35,6 +35,7 @@ ENV TEMP=/app/temp
 WORKDIR /app
 
 COPY --from=builder /app/bot-converter /app/bot-converter
+COPY migrations /app/migrations
 
 RUN chmod +x /app/bot-converter
 

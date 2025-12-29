@@ -9,17 +9,20 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"github.com/BatmanBruc/bat-bot-convetor/internal/contextkeys"
+	"github.com/BatmanBruc/bat-bot-convetor/internal/i18n"
 	"github.com/BatmanBruc/bat-bot-convetor/internal/messages"
 	"github.com/BatmanBruc/bat-bot-convetor/types"
 )
 
 type Middlewares struct {
-	store types.TaskStore
+	store     types.TaskStore
+	userStore types.UserStore
 }
 
-func NewMessageAnalyzer(store types.TaskStore) *Middlewares {
+func NewMessageAnalyzer(store types.TaskStore, userStore types.UserStore) *Middlewares {
 	return &Middlewares{
-		store: store,
+		store:     store,
+		userStore: userStore,
 	}
 }
 
@@ -30,22 +33,53 @@ func (m *Middlewares) CheckTaskMiddleWare(next bot.HandlerFunc) bot.HandlerFunc 
 			chatID int64
 		)
 
+		var username string
+		var firstName string
+		var lastName string
+		langCode := ""
 		switch {
 		case update.Message != nil && update.Message.From != nil:
 			userID = update.Message.From.ID
 			chatID = update.Message.Chat.ID
+			username = update.Message.From.Username
+			firstName = update.Message.From.FirstName
+			lastName = update.Message.From.LastName
+			langCode = update.Message.From.LanguageCode
 		case update.CallbackQuery != nil:
 			userID = update.CallbackQuery.From.ID
 			chatID = getChatIDFromMaybeInaccessibleMessage(update.CallbackQuery.Message)
+			username = update.CallbackQuery.From.Username
+			firstName = update.CallbackQuery.From.FirstName
+			lastName = update.CallbackQuery.From.LastName
+			langCode = update.CallbackQuery.From.LanguageCode
 			if chatID == 0 {
 				return
 			}
+		case update.PreCheckoutQuery != nil:
+			userID = update.PreCheckoutQuery.From.ID
+			username = update.PreCheckoutQuery.From.Username
+			firstName = update.PreCheckoutQuery.From.FirstName
+			lastName = update.PreCheckoutQuery.From.LastName
+			langCode = update.PreCheckoutQuery.From.LanguageCode
 		default:
 			return
 		}
 
-		if userID == 0 || chatID == 0 {
+		if userID == 0 {
 			return
+		}
+
+		lang := i18n.FromLanguageCode(langCode)
+		ctx = contextkeys.WithLang(ctx, string(lang))
+
+		if m.userStore != nil {
+			_ = m.userStore.UpsertUser(types.User{
+				UserID:    userID,
+				ChatID:    chatID,
+				Username:  username,
+				FirstName: firstName,
+				LastName:  lastName,
+			})
 		}
 
 		session, err := m.store.GetUserSession(userID)
@@ -56,16 +90,22 @@ func (m *Middlewares) CheckTaskMiddleWare(next bot.HandlerFunc) bot.HandlerFunc 
 				ChatID: chatID,
 				State:  types.StateStart,
 			}
+			if session.ChatID == 0 {
+				session.ChatID = userID
+			}
 			err = m.store.CreateSession(session)
 			if err != nil {
 				log.Printf("Error creating session: %v", err)
 				b.SendMessage(ctx, &bot.SendMessageParams{
-					ChatID:    chatID,
-					Text:      messages.ErrorDefault(),
+					ChatID:    session.ChatID,
+					Text:      messages.ErrorDefault(lang),
 					ParseMode: messages.ParseModeHTML,
 				})
 				return
 			}
+		}
+		if chatID == 0 {
+			chatID = session.ChatID
 		}
 
 		ctx = contextkeys.WithSessionID(ctx, session.ID)
@@ -87,6 +127,12 @@ func getChatIDFromMaybeInaccessibleMessage(m models.MaybeInaccessibleMessage) in
 func (ma *Middlewares) AnalyzeMessageMiddleware(next bot.HandlerFunc) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		var newCtx context.Context
+
+		if update.PreCheckoutQuery != nil {
+			newCtx = contextkeys.WithMessageType(ctx, contextkeys.MessageTypePreCheckout)
+			next(newCtx, b, update)
+			return
+		}
 
 		if update.CallbackQuery != nil && update.CallbackQuery.Data != "" {
 			newCtx = contextkeys.WithMessageType(ctx, contextkeys.MessageTypeClickButton)
@@ -111,6 +157,10 @@ func (ma *Middlewares) analyzeMessage(ctx context.Context, update *models.Update
 	}
 
 	msg := update.Message
+	if msg.SuccessfulPayment != nil {
+		ctx = contextkeys.WithMessageType(ctx, contextkeys.MessageTypePayment)
+		return ctx
+	}
 	var msgType contextkeys.MessageType
 	var filesInfo *contextkeys.FilesInfo
 

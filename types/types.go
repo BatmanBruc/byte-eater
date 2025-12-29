@@ -48,7 +48,7 @@ type TaskStore interface {
 	DeleteTask(taskID string) error
 
 	SetWaitingFile(sessionID string, targetExt string) (*Session, error)
-	SetProcessingFile(sessionID string, fileID, fileName string) (*Task, error)
+	SetProcessingFile(sessionID string, fileID, fileName string, fileSize int64) (*Task, error)
 	GetProcessingTasks() ([]*Task, error)
 
 	SetTaskReady(taskID, resultFileID string) error
