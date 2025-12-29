@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strconv"
 
+	"github.com/BatmanBruc/bat-bot-convetor/internal/config"
 	"github.com/BatmanBruc/bat-bot-convetor/internal/converter"
 	"github.com/BatmanBruc/bat-bot-convetor/internal/handlers"
 	"github.com/BatmanBruc/bat-bot-convetor/internal/middleware"
@@ -18,6 +19,8 @@ import (
 )
 
 func main() {
+	_ = config.LoadEnvFile("config.env")
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
