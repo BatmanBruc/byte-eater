@@ -19,6 +19,8 @@ type FormatCategory struct {
 type FormatButton struct {
 	Text         string
 	CallbackData string
+	Credits      int
+	Heavy        bool
 }
 
 func normalizeExt(ext string) string {
@@ -190,6 +192,8 @@ func GetFormatButtonsBySourceExtWithCredits(sourceExt string, taskID string, fil
 		buttons = append(buttons, FormatButton{
 			Text:         text,
 			CallbackData: strings.ToLower(t) + "_for_" + taskID,
+			Credits:      credits,
+			Heavy:        heavy,
 		})
 	}
 	return buttons

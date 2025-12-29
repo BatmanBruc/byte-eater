@@ -428,8 +428,12 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 		return
 	}
 	lang := langFromSessionOrCtx(ctx, session)
-
-	_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, "")
+	chatID := int64(0)
+	messageID := 0
+	if update.CallbackQuery.Message.Message != nil {
+		chatID = update.CallbackQuery.Message.Message.Chat.ID
+		messageID = update.CallbackQuery.Message.Message.ID
+	}
 
 	data, _ := contextkeys.GetCallbackData(ctx)
 	if data == "" {
@@ -501,11 +505,13 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 		r, u, err := bh.billing.Consume(session.UserID, credits)
 		if err != nil {
 			if err == store.ErrInsufficientCredits {
-				_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, messages.CallbackInsufficientCredits(lang, r))
+				bh.refreshPendingSelections(ctx, b, session, lang, false, r, messageID, taskID)
+				bh.refreshSelectionMessage(ctx, b, chatID, messageID, lang, task, false, r)
+				_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackInsufficientCredits(lang, r))
 				return
 			}
 			log.Printf("Billing error: %v", err)
-			_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, messages.CallbackBillingError(lang))
+			_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackBillingError(lang))
 			return
 		}
 		unlimited = u
@@ -541,15 +547,8 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 	}
 	if err := bh.store.UpdateTask(task); err != nil {
 		log.Printf("Error updating task %s: %v", taskID, err)
-		_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, messages.CallbackTaskUpdateFailed(lang))
+		_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackTaskUpdateFailed(lang))
 		return
-	}
-
-	chatID := int64(0)
-	messageID := 0
-	if update.CallbackQuery.Message.Message != nil {
-		chatID = update.CallbackQuery.Message.Message.Chat.ID
-		messageID = update.CallbackQuery.Message.Message.ID
 	}
 
 	priority := unlimited
@@ -591,6 +590,11 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 			ParseMode: messages.ParseModeHTML,
 		})
 	}
+
+	bh.removePendingSelection(session, messageID, taskID)
+	_ = bh.store.UpdateSession(session)
+	bh.refreshPendingSelections(ctx, b, session, lang, unlimited, remaining, messageID, taskID)
+	_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, "")
 }
 
 func (bh *Handlers) parseClickButtonData(data string) (format string, taskID string, err error) {
@@ -613,6 +617,203 @@ func (bh *Handlers) answerCallback(ctx context.Context, b *bot.Bot, callbackID, 
 		Text:            text,
 	})
 	return err
+}
+
+func (bh *Handlers) answerCallbackAlert(ctx context.Context, b *bot.Bot, callbackID, text string) error {
+	_, err := b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+		CallbackQueryID: callbackID,
+		Text:            text,
+		ShowAlert:       true,
+	})
+	return err
+}
+
+func (bh *Handlers) filterButtonsByBalance(buttons []formats.FormatButton, unlimited bool, remaining int) []formats.FormatButton {
+	if unlimited {
+		return buttons
+	}
+	if remaining <= 0 {
+		out := make([]formats.FormatButton, 0, len(buttons))
+		for _, btn := range buttons {
+			if btn.Credits == 0 {
+				out = append(out, btn)
+			}
+		}
+		return out
+	}
+	out := make([]formats.FormatButton, 0, len(buttons))
+	for _, btn := range buttons {
+		if btn.Credits == 0 || btn.Credits <= remaining {
+			out = append(out, btn)
+		}
+	}
+	return out
+}
+
+func (bh *Handlers) refreshSelectionMessage(ctx context.Context, b *bot.Bot, chatID int64, messageID int, lang i18n.Lang, task *types.Task, unlimited bool, remaining int) {
+	if chatID == 0 || messageID == 0 || task == nil || strings.TrimSpace(task.ID) == "" {
+		return
+	}
+	fileSize := int64(0)
+	if task.Options != nil {
+		if v, ok := task.Options["file_size"]; ok {
+			switch t := v.(type) {
+			case int64:
+				fileSize = t
+			case int:
+				fileSize = int64(t)
+			case float64:
+				fileSize = int64(t)
+			}
+		}
+	}
+	textInput := false
+	if task.Options != nil {
+		if v, ok := task.Options["text_input"]; ok {
+			if bv, ok := v.(bool); ok {
+				textInput = bv
+			}
+		}
+	}
+
+	buttons := []formats.FormatButton{}
+	if textInput {
+		buttons = formats.GetTextOutputButtons(task.ID)
+	} else {
+		buttons = formats.GetFormatButtonsBySourceExtWithCredits(task.OriginalExt, task.ID, fileSize)
+	}
+	buttons = bh.filterButtonsByBalance(buttons, unlimited, remaining)
+	text := ""
+	if textInput {
+		text = messages.TextReceivedChooseFormat(lang)
+	} else {
+		text = messages.FileReceivedChooseFormat(lang, task.FileName)
+	}
+	if bh.billing != nil {
+		if unlimited {
+			text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
+		} else {
+			text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
+		}
+	}
+	_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
+		ChatID:    chatID,
+		MessageID: messageID,
+		Text:      text,
+		ParseMode: messages.ParseModeHTML,
+		ReplyMarkup: &models.InlineKeyboardMarkup{
+			InlineKeyboard: bh.buildInlineKeyboard(buttons).InlineKeyboard,
+		},
+	})
+}
+
+func (bh *Handlers) refreshPendingSelections(ctx context.Context, b *bot.Bot, session *types.Session, lang i18n.Lang, unlimited bool, remaining int, excludeMessageID int, excludeTaskID string) {
+	if session == nil {
+		return
+	}
+	excludeTaskID = strings.TrimSpace(excludeTaskID)
+	next := make([]types.PendingSelection, 0, len(session.Pending))
+	for _, p := range session.Pending {
+		if p.MessageID == 0 || strings.TrimSpace(p.TaskID) == "" {
+			continue
+		}
+		if excludeMessageID != 0 && p.MessageID == excludeMessageID {
+			next = append(next, p)
+			continue
+		}
+		if excludeTaskID != "" && p.TaskID == excludeTaskID {
+			next = append(next, p)
+			continue
+		}
+		task, err := bh.store.GetTask(p.TaskID)
+		if err != nil || task == nil {
+			continue
+		}
+		if task.State != types.StateChooseExt {
+			continue
+		}
+		fileSize := int64(0)
+		if task.Options != nil {
+			if v, ok := task.Options["file_size"]; ok {
+				switch t := v.(type) {
+				case int64:
+					fileSize = t
+				case int:
+					fileSize = int64(t)
+				case float64:
+					fileSize = int64(t)
+				}
+			}
+		}
+		textInput := false
+		if task.Options != nil {
+			if v, ok := task.Options["text_input"]; ok {
+				if bv, ok := v.(bool); ok {
+					textInput = bv
+				}
+			}
+		}
+
+		buttons := []formats.FormatButton{}
+		if textInput {
+			buttons = formats.GetTextOutputButtons(task.ID)
+		} else {
+			buttons = formats.GetFormatButtonsBySourceExtWithCredits(task.OriginalExt, task.ID, fileSize)
+		}
+		buttons = bh.filterButtonsByBalance(buttons, unlimited, remaining)
+		text := ""
+		if textInput {
+			text = messages.TextReceivedChooseFormat(lang)
+		} else {
+			text = messages.FileReceivedChooseFormat(lang, task.FileName)
+		}
+		if bh.billing != nil {
+			if unlimited {
+				text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
+			} else {
+				text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
+			}
+		}
+		_, err = b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    session.ChatID,
+			MessageID: p.MessageID,
+			Text:      text,
+			ParseMode: messages.ParseModeHTML,
+			ReplyMarkup: &models.InlineKeyboardMarkup{
+				InlineKeyboard: bh.buildInlineKeyboard(buttons).InlineKeyboard,
+			},
+		})
+		if err != nil {
+			continue
+		}
+		next = append(next, p)
+	}
+	session.Pending = next
+	_ = bh.store.UpdateSession(session)
+}
+
+func (bh *Handlers) removePendingSelection(session *types.Session, messageID int, taskID string) {
+	if session == nil {
+		return
+	}
+	taskID = strings.TrimSpace(taskID)
+	if messageID == 0 && taskID == "" {
+		return
+	}
+	next := make([]types.PendingSelection, 0, len(session.Pending))
+	for _, p := range session.Pending {
+		if p.MessageID == 0 || strings.TrimSpace(p.TaskID) == "" {
+			continue
+		}
+		if messageID != 0 && p.MessageID == messageID {
+			continue
+		}
+		if taskID != "" && p.TaskID == taskID {
+			continue
+		}
+		next = append(next, p)
+	}
+	session.Pending = next
 }
 
 func (bh *Handlers) HandleCommand(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session) {
@@ -736,6 +937,21 @@ func (bh *Handlers) HandleFile(ctx context.Context, b *bot.Bot, update *models.U
 		return
 	}
 
+	unlimited := false
+	remaining := 0
+	if bh.billing != nil {
+		u, err := bh.billing.IsUnlimited(session.UserID)
+		if err == nil {
+			unlimited = u
+		}
+		if !unlimited {
+			r, err := bh.billing.GetOrResetBalance(session.UserID)
+			if err == nil {
+				remaining = r
+			}
+		}
+	}
+
 	for _, fileInfo := range filesInfo.Files {
 		fileName := strings.TrimSpace(fileInfo.FileName)
 		if strings.EqualFold(fileName, "photo.jpg") {
@@ -792,23 +1008,23 @@ func (bh *Handlers) HandleFile(ctx context.Context, b *bot.Bot, update *models.U
 
 		text := messages.FileReceivedChooseFormat(lang, fileName)
 		if bh.billing != nil {
-			unlimited, err := bh.billing.IsUnlimited(session.UserID)
-			if err == nil && unlimited {
+			if unlimited {
 				text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
-			} else if err == nil {
-				rem, err := bh.billing.GetOrResetBalance(session.UserID)
-				if err == nil {
-					text = text + "\n\n" + messages.CreditsRemainingLine(lang, rem)
-				}
+			} else {
+				text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
 			}
 		}
 
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+		sent, _ := b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:      update.Message.Chat.ID,
 			Text:        text,
 			ParseMode:   messages.ParseModeHTML,
 			ReplyMarkup: keyboard,
 		})
+		if sent != nil {
+			bh.addPendingSelection(session, sent.ID, task.ID)
+			_ = bh.store.UpdateSession(session)
+		}
 	}
 }
 
@@ -933,6 +1149,7 @@ func (bh *Handlers) HandleText(ctx context.Context, b *bot.Bot, update *models.U
 		task.Options = map[string]interface{}{}
 	}
 	task.Options["lang"] = string(lang)
+	task.Options["text_input"] = true
 	_ = bh.store.UpdateTask(task)
 
 	buttons := formats.GetTextOutputButtons(task.ID)
@@ -949,10 +1166,35 @@ func (bh *Handlers) HandleText(ctx context.Context, b *bot.Bot, update *models.U
 			}
 		}
 	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+	sent, _ := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      chatID,
 		Text:        textOut,
 		ParseMode:   messages.ParseModeHTML,
 		ReplyMarkup: keyboard,
 	})
+	if sent != nil {
+		bh.addPendingSelection(session, sent.ID, task.ID)
+		_ = bh.store.UpdateSession(session)
+	}
+}
+
+func (bh *Handlers) addPendingSelection(session *types.Session, messageID int, taskID string) {
+	if session == nil || messageID == 0 || strings.TrimSpace(taskID) == "" {
+		return
+	}
+	next := make([]types.PendingSelection, 0, len(session.Pending)+1)
+	for _, p := range session.Pending {
+		if p.MessageID == 0 || strings.TrimSpace(p.TaskID) == "" {
+			continue
+		}
+		if p.MessageID == messageID || p.TaskID == taskID {
+			continue
+		}
+		next = append(next, p)
+	}
+	next = append(next, types.PendingSelection{MessageID: messageID, TaskID: taskID})
+	if len(next) > 25 {
+		next = next[len(next)-25:]
+	}
+	session.Pending = next
 }

@@ -2,12 +2,18 @@ package types
 
 import "time"
 
+type PendingSelection struct {
+	MessageID int    `json:"message_id"`
+	TaskID    string `json:"task_id"`
+}
+
 type Session struct {
 	ID        string                 `json:"id"`
 	UserID    int64                  `json:"user_id"`
 	ChatID    int64                  `json:"chat_id"`
 	State     ChatState              `json:"state"`
 	TargetExt string                 `json:"target_ext,omitempty"`
+	Pending   []PendingSelection     `json:"pending,omitempty"`
 	Options   map[string]interface{} `json:"options,omitempty"`
 	CreatedAt time.Time              `json:"created_at"`
 	UpdatedAt time.Time              `json:"updated_at"`
