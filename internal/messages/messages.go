@@ -130,6 +130,13 @@ func CreditsRemainingLine(lang i18n.Lang, remaining int) string {
 	return fmt.Sprintf("Remaining credits: %d/50", remaining)
 }
 
+func NoCreditsHint(lang i18n.Lang) string {
+	if lang == i18n.RU {
+		return "К сожалению, у вас закончились кредиты. Подождите до следующего обновления (раз в 24 часа) или оформите подписку и пользуйтесь безлимитом."
+	}
+	return "Unfortunately, you're out of credits. Wait for the next daily reset (every 24 hours) or get a subscription to use unlimited conversions."
+}
+
 func BalanceUnavailable(lang i18n.Lang) string {
 	return pick(lang, "Баланс недоступен", "Balance is unavailable")
 }
@@ -160,9 +167,34 @@ func CallbackBillingError(lang i18n.Lang) string {
 
 func CallbackInsufficientCredits(lang i18n.Lang, remaining int) string {
 	if lang == i18n.RU {
+		if remaining <= 0 {
+			return "Недостаточно кредитов. Осталось 0/50.\n\n" + NoCreditsHint(lang)
+		}
 		return fmt.Sprintf("Недостаточно кредитов. Осталось %d/50", remaining)
 	}
+	if remaining <= 0 {
+		return "Not enough credits. Remaining 0/50.\n\n" + NoCreditsHint(lang)
+	}
 	return fmt.Sprintf("Not enough credits. Remaining %d/50", remaining)
+}
+
+func AdminGrantUsage(lang i18n.Lang) string {
+	return pick(
+		lang,
+		"Использование: <code>/grant_unlimited &lt;SECRET&gt; [30|forever]</code>",
+		"Usage: <code>/grant_unlimited &lt;SECRET&gt; [30|forever]</code>",
+	)
+}
+
+func AdminGrantDone(lang i18n.Lang, until *time.Time) string {
+	if until == nil {
+		return pick(lang, "✅ Подписка активирована: бессрочно", "✅ Subscription activated: forever")
+	}
+	return pick(lang, "✅ Подписка активирована до: ", "✅ Subscription activated until: ") + Escape(until.UTC().Format("2006-01-02"))
+}
+
+func AdminDenied(lang i18n.Lang) string {
+	return pick(lang, "Недостаточно прав", "Access denied")
 }
 
 func TaskTypeLine(lang i18n.Lang, heavy bool) string {

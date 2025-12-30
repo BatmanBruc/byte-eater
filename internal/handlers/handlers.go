@@ -447,7 +447,87 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 	}
 
 	format = strings.ToLower(format)
-	if !formats.FormatExists(format) {
+	action := ""
+	targetExt := format
+	quality := 0
+	maxSize := 0
+	imgW := 0
+	imgH := 0
+	videoHeight := 0
+	videoCRF := 0
+	videoGIFHeight := 0
+	vidW := 0
+	vidH := 0
+	p := strings.Split(format, "_")
+	if len(p) == 3 && p[0] == "imgc" {
+		action = "compress"
+		targetExt = strings.ToLower(strings.TrimSpace(p[1]))
+		quality, _ = strconv.Atoi(strings.TrimSpace(p[2]))
+	}
+	if len(p) == 3 && p[0] == "imgr" {
+		action = "resize"
+		targetExt = strings.ToLower(strings.TrimSpace(p[1]))
+		maxSize, _ = strconv.Atoi(strings.TrimSpace(p[2]))
+	}
+	if len(p) == 3 && p[0] == "vidr" {
+		action = "vid_resize"
+		targetExt = strings.ToLower(strings.TrimSpace(p[1]))
+		videoHeight, _ = strconv.Atoi(strings.TrimSpace(p[2]))
+	}
+	if len(p) == 3 && p[0] == "vidc" {
+		action = "vid_compress"
+		targetExt = strings.ToLower(strings.TrimSpace(p[1]))
+		videoCRF, _ = strconv.Atoi(strings.TrimSpace(p[2]))
+	}
+	if len(p) == 3 && p[0] == "vidg" {
+		action = "vid_gif"
+		targetExt = strings.ToLower(strings.TrimSpace(p[1]))
+		videoGIFHeight, _ = strconv.Atoi(strings.TrimSpace(p[2]))
+	}
+	profile := ""
+	if len(p) >= 2 && p[0] == "pimg" {
+		profile = strings.Join(p[1:], "_")
+		action = "profile_img"
+		targetExt = "jpg"
+		quality = 85
+		switch profile {
+		case "avito":
+			maxSize = 1600
+		case "instagram_feed":
+			imgW = 1080
+			imgH = 1080
+		case "instagram_story":
+			imgW = 1080
+			imgH = 1920
+		case "vk_square":
+			imgW = 1080
+			imgH = 1080
+		default:
+			action = ""
+		}
+	}
+	if len(p) >= 2 && p[0] == "pvid" {
+		profile = strings.Join(p[1:], "_")
+		action = "profile_vid"
+		targetExt = "mp4"
+		videoCRF = 28
+		switch profile {
+		case "tiktok", "reels", "shorts", "vk_clips":
+			vidW = 1080
+			vidH = 1920
+		case "youtube_1080p":
+			vidW = 1920
+			vidH = 1080
+		default:
+			action = ""
+		}
+	}
+	if (len(p) >= 1 && (p[0] == "pimg" || p[0] == "pvid")) && action == "" {
+		_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackInvalidButtonData(lang))
+		return
+	}
+
+	if !formats.FormatExists(targetExt) {
 		_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, messages.CallbackUnsupportedFormat(lang))
 		return
 	}
@@ -482,7 +562,7 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 	heavy := false
 	if v, ok := task.Options["pricing"]; ok {
 		if m, ok := v.(map[string]interface{}); ok {
-			if cv, ok := m[strings.ToUpper(format)]; ok {
+			if cv, ok := m[strings.ToUpper(targetExt)]; ok {
 				switch ct := cv.(type) {
 				case int:
 					credits = ct
@@ -495,9 +575,9 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 		}
 	}
 	if credits == 0 {
-		credits, heavy = pricing.Credits(task.OriginalExt, format, fileSize)
+		credits, heavy = pricing.Credits(task.OriginalExt, targetExt, fileSize)
 	} else {
-		_, heavy = pricing.Credits(task.OriginalExt, format, fileSize)
+		_, heavy = pricing.Credits(task.OriginalExt, targetExt, fileSize)
 	}
 	unlimited := false
 	remaining := 0
@@ -536,12 +616,75 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 		})
 	}
 
-	task.TargetExt = format
+	task.TargetExt = targetExt
 	task.State = types.StateProcessing
 	task.Options["credits"] = credits
 	task.Options["is_heavy"] = heavy
 	task.Options["unlimited"] = unlimited
 	task.Options["lang"] = string(lang)
+	delete(task.Options, "img_op")
+	delete(task.Options, "img_quality")
+	delete(task.Options, "img_max")
+	delete(task.Options, "img_w")
+	delete(task.Options, "img_h")
+	delete(task.Options, "vid_op")
+	delete(task.Options, "vid_height")
+	delete(task.Options, "vid_crf")
+	delete(task.Options, "vid_gif_height")
+	delete(task.Options, "vid_w")
+	delete(task.Options, "vid_h")
+	if action != "" {
+		if action == "compress" || action == "resize" {
+			task.Options["img_op"] = action
+		}
+		if action == "compress" && quality > 0 {
+			task.Options["img_quality"] = quality
+		}
+		if action == "resize" && maxSize > 0 {
+			task.Options["img_max"] = maxSize
+		}
+		if action == "profile_img" {
+			task.Options["img_op"] = "profile"
+			if quality > 0 {
+				task.Options["img_quality"] = quality
+			}
+			if maxSize > 0 {
+				task.Options["img_max"] = maxSize
+			}
+			if imgW > 0 && imgH > 0 {
+				task.Options["img_w"] = imgW
+				task.Options["img_h"] = imgH
+			}
+		}
+		if action == "vid_resize" {
+			task.Options["vid_op"] = "resize"
+			if videoHeight > 0 {
+				task.Options["vid_height"] = videoHeight
+			}
+		}
+		if action == "vid_compress" {
+			task.Options["vid_op"] = "compress"
+			if videoCRF > 0 {
+				task.Options["vid_crf"] = videoCRF
+			}
+		}
+		if action == "vid_gif" {
+			task.Options["vid_op"] = "gif"
+			if videoGIFHeight > 0 {
+				task.Options["vid_gif_height"] = videoGIFHeight
+			}
+		}
+		if action == "profile_vid" {
+			task.Options["vid_op"] = "profile"
+			if videoCRF > 0 {
+				task.Options["vid_crf"] = videoCRF
+			}
+			if vidW > 0 && vidH > 0 {
+				task.Options["vid_w"] = vidW
+				task.Options["vid_h"] = vidH
+			}
+		}
+	}
 	if !unlimited && bh.billing != nil {
 		task.Options["credits_remaining"] = remaining
 	}
@@ -680,7 +823,7 @@ func (bh *Handlers) refreshSelectionMessage(ctx context.Context, b *bot.Bot, cha
 	if textInput {
 		buttons = formats.GetTextOutputButtons(task.ID)
 	} else {
-		buttons = formats.GetFormatButtonsBySourceExtWithCredits(task.OriginalExt, task.ID, fileSize)
+		buttons = formats.GetButtonsForSourceExtWithCredits(task.OriginalExt, task.ID, fileSize, lang)
 	}
 	buttons = bh.filterButtonsByBalance(buttons, unlimited, remaining)
 	text := ""
@@ -694,6 +837,9 @@ func (bh *Handlers) refreshSelectionMessage(ctx context.Context, b *bot.Bot, cha
 			text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
 		} else {
 			text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
+			if remaining <= 0 {
+				text = text + "\n" + messages.NoCreditsHint(lang)
+			}
 		}
 	}
 	_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
@@ -758,7 +904,7 @@ func (bh *Handlers) refreshPendingSelections(ctx context.Context, b *bot.Bot, se
 		if textInput {
 			buttons = formats.GetTextOutputButtons(task.ID)
 		} else {
-			buttons = formats.GetFormatButtonsBySourceExtWithCredits(task.OriginalExt, task.ID, fileSize)
+			buttons = formats.GetButtonsForSourceExtWithCredits(task.OriginalExt, task.ID, fileSize, lang)
 		}
 		buttons = bh.filterButtonsByBalance(buttons, unlimited, remaining)
 		text := ""
@@ -772,6 +918,9 @@ func (bh *Handlers) refreshPendingSelections(ctx context.Context, b *bot.Bot, se
 				text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
 			} else {
 				text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
+				if remaining <= 0 {
+					text = text + "\n" + messages.NoCreditsHint(lang)
+				}
 			}
 		}
 		_, err = b.EditMessageText(ctx, &bot.EditMessageTextParams{
@@ -829,6 +978,85 @@ func (bh *Handlers) HandleCommand(ctx context.Context, b *bot.Bot, update *model
 	}
 
 	switch cmd {
+	case "/grant_unlimited":
+		if !isAdminUser(session.UserID) {
+			b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:    update.Message.Chat.ID,
+				Text:      messages.ErrorUnknownCommand(lang),
+				ParseMode: messages.ParseModeHTML,
+			})
+			return
+		}
+		secret := ""
+		arg := ""
+		if len(fields) >= 2 {
+			secret = strings.TrimSpace(fields[1])
+		}
+		if len(fields) >= 3 {
+			arg = strings.TrimSpace(fields[2])
+		}
+		if secret == "" {
+			b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:    update.Message.Chat.ID,
+				Text:      messages.AdminGrantUsage(lang),
+				ParseMode: messages.ParseModeHTML,
+			})
+			return
+		}
+		if !adminSecretOK(secret) {
+			b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:    update.Message.Chat.ID,
+				Text:      messages.AdminDenied(lang),
+				ParseMode: messages.ParseModeHTML,
+			})
+			return
+		}
+		if bh.userStore == nil {
+			b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:    update.Message.Chat.ID,
+				Text:      messages.ErrorDefault(lang),
+				ParseMode: messages.ParseModeHTML,
+			})
+			return
+		}
+
+		if arg == "" {
+			arg = "30"
+		}
+		if strings.EqualFold(arg, "forever") {
+			sub := types.Subscription{UserID: session.UserID, Plan: "unlimited", Status: "active", ExpiresAt: nil}
+			_ = bh.userStore.UpsertSubscription(sub)
+			b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:    update.Message.Chat.ID,
+				Text:      messages.AdminGrantDone(lang, nil),
+				ParseMode: messages.ParseModeHTML,
+			})
+			return
+		}
+		days, err := strconv.Atoi(arg)
+		if err != nil || days <= 0 || days > 3650 {
+			b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:    update.Message.Chat.ID,
+				Text:      messages.AdminGrantUsage(lang),
+				ParseMode: messages.ParseModeHTML,
+			})
+			return
+		}
+		sub, err := bh.userStore.ActivateOrExtendUnlimited(session.UserID, time.Duration(days)*24*time.Hour)
+		if err != nil {
+			b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:    update.Message.Chat.ID,
+				Text:      messages.ErrorDefault(lang),
+				ParseMode: messages.ParseModeHTML,
+			})
+			return
+		}
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    update.Message.Chat.ID,
+			Text:      messages.AdminGrantDone(lang, sub.ExpiresAt),
+			ParseMode: messages.ParseModeHTML,
+		})
+		return
 	case "/start":
 		session.State = types.StateStart
 		session.TargetExt = ""
@@ -925,6 +1153,40 @@ func (bh *Handlers) HandleCommand(ctx context.Context, b *bot.Bot, update *model
 	}
 }
 
+func isAdminUser(userID int64) bool {
+	raw := strings.TrimSpace(os.Getenv("ADMIN_USER_IDS"))
+	if raw == "" {
+		return false
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ';' || r == ' ' || r == '\n' || r == '\t' })
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(p, 10, 64)
+		if err != nil {
+			continue
+		}
+		if id == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func adminSecretOK(secret string) bool {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return false
+	}
+	expected := strings.TrimSpace(os.Getenv("ADMIN_SECRET"))
+	if expected == "" {
+		return false
+	}
+	return secret == expected
+}
+
 func (bh *Handlers) HandleFile(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session) {
 	filesInfo, hasFiles := contextkeys.GetFilesInfo(ctx)
 	lang := langFromSessionOrCtx(ctx, session)
@@ -994,7 +1256,7 @@ func (bh *Handlers) HandleFile(ctx context.Context, b *bot.Bot, update *models.U
 		task.Options["lang"] = string(lang)
 		_ = bh.store.UpdateTask(task)
 
-		buttons := formats.GetFormatButtonsBySourceExtWithCredits(ext, task.ID, fileInfo.FileSize)
+		buttons := formats.GetButtonsForSourceExtWithCredits(ext, task.ID, fileInfo.FileSize, lang)
 		if len(buttons) == 0 {
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID:    update.Message.Chat.ID,
@@ -1012,6 +1274,9 @@ func (bh *Handlers) HandleFile(ctx context.Context, b *bot.Bot, update *models.U
 				text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
 			} else {
 				text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
+				if remaining <= 0 {
+					text = text + "\n" + messages.NoCreditsHint(lang)
+				}
 			}
 		}
 
@@ -1163,6 +1428,9 @@ func (bh *Handlers) HandleText(ctx context.Context, b *bot.Bot, update *models.U
 			rem, err := bh.billing.GetOrResetBalance(session.UserID)
 			if err == nil {
 				textOut = textOut + "\n\n" + messages.CreditsRemainingLine(lang, rem)
+				if rem <= 0 {
+					textOut = textOut + "\n" + messages.NoCreditsHint(lang)
+				}
 			}
 		}
 	}

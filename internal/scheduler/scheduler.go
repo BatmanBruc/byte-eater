@@ -418,7 +418,7 @@ func (s *Scheduler) processTask(task *types.Task) error {
 	defer cancel()
 	lang := langFromTask(task)
 
-	resultPath, outName, err := s.converter.Convert(ctx, s.botClient, task.FileID, task.OriginalExt, task.TargetExt, task.FileName)
+	resultPath, outName, err := s.converter.Convert(ctx, s.botClient, task.FileID, task.OriginalExt, task.TargetExt, task.FileName, task.Options)
 	if err != nil {
 		if err := s.store.SetTaskError(task.ID, err.Error()); err != nil {
 			log.Printf("Error setting task error: %v", err)

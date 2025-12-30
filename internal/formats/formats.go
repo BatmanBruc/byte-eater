@@ -199,6 +199,177 @@ func GetFormatButtonsBySourceExtWithCredits(sourceExt string, taskID string, fil
 	return buttons
 }
 
+func pick(lang i18n.Lang, ru string, en string) string {
+	if lang == i18n.RU {
+		return ru
+	}
+	return en
+}
+
+func GetButtonsForSourceExtWithCredits(sourceExt string, taskID string, fileSize int64, lang i18n.Lang) []FormatButton {
+	sourceExt = normalizeExt(sourceExt)
+	if containsCaseInsensitive(imageFormats(), sourceExt) {
+		return getImageActionButtonsWithCredits(sourceExt, taskID, fileSize, lang)
+	}
+	if containsCaseInsensitive(videoFormats(), sourceExt) {
+		return getVideoActionButtonsWithCredits(sourceExt, taskID, fileSize, lang)
+	}
+	return GetFormatButtonsBySourceExtWithCredits(sourceExt, taskID, fileSize)
+}
+
+func formatButtonText(label string, credits int, heavy bool) string {
+	label = strings.TrimSpace(label)
+	if credits <= 0 {
+		return label
+	}
+	if heavy {
+		return label + " " + "★" + " " + fmt.Sprintf("(%d)", credits)
+	}
+	return label + " " + fmt.Sprintf("(%d)", credits)
+}
+
+func getImageActionButtonsWithCredits(sourceExt string, taskID string, fileSize int64, lang i18n.Lang) []FormatButton {
+	buttons := make([]FormatButton, 0)
+	{
+		credits, heavy := pricing.Credits(sourceExt, "jpg", fileSize)
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(pick(lang, "🛒 Авито (JPG)", "🛒 Avito (JPG)"), credits, heavy),
+			CallbackData: fmt.Sprintf("pimg_avito_for_%s", taskID),
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(pick(lang, "📸 Instagram пост 1080×1080", "📸 Instagram post 1080×1080"), credits, heavy),
+			CallbackData: fmt.Sprintf("pimg_instagram_feed_for_%s", taskID),
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(pick(lang, "📲 Instagram сторис 1080×1920", "📲 Instagram story 1080×1920"), credits, heavy),
+			CallbackData: fmt.Sprintf("pimg_instagram_story_for_%s", taskID),
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(pick(lang, "🟦 VK пост 1080×1080", "🟦 VK post 1080×1080"), credits, heavy),
+			CallbackData: fmt.Sprintf("pimg_vk_square_for_%s", taskID),
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+	}
+	buttons = append(buttons, GetFormatButtonsBySourceExtWithCredits(sourceExt, taskID, fileSize)...)
+
+	resizePresets := []int{1080, 720}
+	for _, max := range resizePresets {
+		credits, heavy := pricing.Credits(sourceExt, sourceExt, fileSize)
+		label := fmt.Sprintf("%s %dpx", pick(lang, "📏", "📏"), max)
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(label, credits, heavy),
+			CallbackData: fmt.Sprintf("imgr_%s_%d_for_%s", strings.ToLower(sourceExt), max, taskID),
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+	}
+
+	compressTargets := []struct {
+		ext     string
+		quality int
+	}{
+		{"jpg", 85},
+		{"jpg", 70},
+		{"webp", 85},
+		{"webp", 70},
+	}
+	for _, ct := range compressTargets {
+		credits, heavy := pricing.Credits(sourceExt, ct.ext, fileSize)
+		label := fmt.Sprintf("%s %s %d%%", pick(lang, "🗜", "🗜"), strings.ToUpper(ct.ext), ct.quality)
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(label, credits, heavy),
+			CallbackData: fmt.Sprintf("imgc_%s_%d_for_%s", strings.ToLower(ct.ext), ct.quality, taskID),
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+	}
+
+	return buttons
+}
+
+func getVideoActionButtonsWithCredits(sourceExt string, taskID string, fileSize int64, lang i18n.Lang) []FormatButton {
+	buttons := make([]FormatButton, 0)
+	{
+		credits, heavy := pricing.Credits(sourceExt, "mp4", fileSize)
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(pick(lang, "🎵 TikTok 9:16 1080×1920", "🎵 TikTok 9:16 1080×1920"), credits, heavy),
+			CallbackData: fmt.Sprintf("pvid_tiktok_for_%s", taskID),
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(pick(lang, "📲 Reels 9:16 1080×1920", "📲 Reels 9:16 1080×1920"), credits, heavy),
+			CallbackData: fmt.Sprintf("pvid_reels_for_%s", taskID),
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(pick(lang, "▶️ Shorts 9:16 1080×1920", "▶️ Shorts 9:16 1080×1920"), credits, heavy),
+			CallbackData: fmt.Sprintf("pvid_shorts_for_%s", taskID),
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(pick(lang, "🟦 VK Clips 9:16 1080×1920", "🟦 VK Clips 9:16 1080×1920"), credits, heavy),
+			CallbackData: fmt.Sprintf("pvid_vk_clips_for_%s", taskID),
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(pick(lang, "📺 YouTube 16:9 1920×1080", "📺 YouTube 16:9 1920×1080"), credits, heavy),
+			CallbackData: fmt.Sprintf("pvid_youtube_1080p_for_%s", taskID),
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+	}
+	buttons = append(buttons, GetFormatButtonsBySourceExtWithCredits(sourceExt, taskID, fileSize)...)
+
+	resizeHeights := []int{720, 480}
+	for _, h := range resizeHeights {
+		credits, heavy := pricing.Credits(sourceExt, "mp4", fileSize)
+		label := fmt.Sprintf("%s %dp", pick(lang, "📏", "📏"), h)
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(label, credits, heavy),
+			CallbackData: fmt.Sprintf("vidr_mp4_%d_for_%s", h, taskID),
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+	}
+
+	crfPresets := []int{28, 35}
+	for _, crf := range crfPresets {
+		credits, heavy := pricing.Credits(sourceExt, "mp4", fileSize)
+		label := fmt.Sprintf("%s MP4 CRF %d", pick(lang, "🗜", "🗜"), crf)
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(label, credits, heavy),
+			CallbackData: fmt.Sprintf("vidc_mp4_%d_for_%s", crf, taskID),
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+	}
+
+	gifHeights := []int{480, 320}
+	for _, h := range gifHeights {
+		credits, heavy := pricing.Credits(sourceExt, "gif", fileSize)
+		label := fmt.Sprintf("%s GIF %dp", pick(lang, "🎞", "🎞"), h)
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(label, credits, heavy),
+			CallbackData: fmt.Sprintf("vidg_gif_%d_for_%s", h, taskID),
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+	}
+
+	return buttons
+}
+
 func GetFormatButtonsByList(formatList []string, taskID string) []FormatButton {
 	buttons := make([]FormatButton, 0, len(formatList))
 	for _, format := range formatList {

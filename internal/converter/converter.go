@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 )
 
 type Converter interface {
-	Convert(ctx context.Context, bot *bot.Bot, fileID string, originalExt, targetExt string, originalFileName string) (resultPath string, resultFileName string, err error)
+	Convert(ctx context.Context, bot *bot.Bot, fileID string, originalExt, targetExt string, originalFileName string, options map[string]interface{}) (resultPath string, resultFileName string, err error)
 }
 
 type DefaultConverter struct {
@@ -31,7 +32,7 @@ func NewDefaultConverter() *DefaultConverter {
 	}
 }
 
-func (c *DefaultConverter) Convert(ctx context.Context, botClient *bot.Bot, fileID string, originalExt, targetExt string, originalFileName string) (string, string, error) {
+func (c *DefaultConverter) Convert(ctx context.Context, botClient *bot.Bot, fileID string, originalExt, targetExt string, originalFileName string, options map[string]interface{}) (string, string, error) {
 	originalExt = strings.ToLower(strings.TrimPrefix(originalExt, "."))
 	targetExt = strings.ToLower(strings.TrimPrefix(targetExt, "."))
 
@@ -58,7 +59,7 @@ func (c *DefaultConverter) Convert(ctx context.Context, botClient *bot.Bot, file
 	}
 	defer func() { _ = os.Remove(originalPath) }()
 
-	if err := c.convertFile(ctx, originalPath, resultPath, originalExt, targetExt); err != nil {
+	if err := c.convertFile(ctx, originalPath, resultPath, originalExt, targetExt, options); err != nil {
 		_ = os.Remove(originalPath)
 		_ = os.Remove(resultPath)
 		return "", "", fmt.Errorf("ошибка конвертации: %v", err)
@@ -113,16 +114,19 @@ func (c *DefaultConverter) downloadFile(ctx context.Context, url, destPath strin
 	return nil
 }
 
-func (c *DefaultConverter) convertFile(ctx context.Context, inputPath, outputPath string, originalExt, targetExt string) error {
+func (c *DefaultConverter) convertFile(ctx context.Context, inputPath, outputPath string, originalExt, targetExt string, options map[string]interface{}) error {
 	originalExt = strings.ToLower(originalExt)
 	targetExt = strings.ToLower(targetExt)
 
 	if originalExt == targetExt {
+		if c.isImageFormat(originalExt) && c.isImageFormat(targetExt) && hasImageOptions(options) {
+			return c.convertImage(ctx, inputPath, outputPath, originalExt, targetExt, options)
+		}
 		return c.copyFile(inputPath, outputPath)
 	}
 
 	if c.isImageFormat(originalExt) && c.isImageFormat(targetExt) {
-		return c.convertImage(ctx, inputPath, outputPath, originalExt, targetExt)
+		return c.convertImage(ctx, inputPath, outputPath, originalExt, targetExt, options)
 	}
 
 	if c.isAudioFormat(originalExt) && c.isAudioFormat(targetExt) {
@@ -134,11 +138,11 @@ func (c *DefaultConverter) convertFile(ctx context.Context, inputPath, outputPat
 	}
 
 	if c.isVideoFormat(originalExt) && targetExt == "gif" {
-		return c.convertVideoToGif(ctx, inputPath, outputPath)
+		return c.convertVideoToGif(ctx, inputPath, outputPath, options)
 	}
 
 	if c.isVideoFormat(originalExt) && c.isVideoFormat(targetExt) {
-		return c.convertVideo(ctx, inputPath, outputPath, originalExt, targetExt)
+		return c.convertVideo(ctx, inputPath, outputPath, originalExt, targetExt, options)
 	}
 
 	if c.isEbookFormat(originalExt) && c.isEbookFormat(targetExt) {
@@ -177,7 +181,7 @@ func (c *DefaultConverter) copyFile(src, dst string) error {
 	return err
 }
 
-func (c *DefaultConverter) convertImage(ctx context.Context, inputPath, outputPath string, originalExt, targetExt string) error {
+func (c *DefaultConverter) convertImage(ctx context.Context, inputPath, outputPath string, originalExt, targetExt string, options map[string]interface{}) error {
 	_ = originalExt
 
 	if !c.hasCommand("magick") && !c.hasCommand("convert") {
@@ -193,13 +197,114 @@ func (c *DefaultConverter) convertImage(ctx context.Context, inputPath, outputPa
 		cmdName = "convert"
 	}
 
-	cmd := exec.CommandContext(ctx, cmdName, inputPath, outputPath)
+	args := []string{inputPath}
+	if max, ok := optInt(options, "img_max"); ok && max > 0 {
+		args = append(args, "-resize", fmt.Sprintf("%dx%d>", max, max))
+	}
+	if w, ok := optInt(options, "img_w"); ok && w > 0 {
+		if h, ok := optInt(options, "img_h"); ok && h > 0 {
+			bg := "white"
+			if bgs, ok := optString(options, "img_bg"); ok {
+				bg = bgs
+			}
+			args = append(args,
+				"-resize", fmt.Sprintf("%dx%d", w, h),
+				"-background", bg,
+				"-gravity", "center",
+				"-extent", fmt.Sprintf("%dx%d", w, h),
+			)
+		}
+	}
+	if q, ok := optInt(options, "img_quality"); ok && q > 0 {
+		if q > 95 {
+			q = 95
+		}
+		if q < 10 {
+			q = 10
+		}
+		args = append(args, "-quality", fmt.Sprintf("%d", q))
+	}
+	args = append(args, outputPath)
+
+	cmd := exec.CommandContext(ctx, cmdName, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ошибка ImageMagick: %v, вывод: %s", err, string(output))
 	}
 
 	return nil
+}
+
+func hasImageOptions(options map[string]interface{}) bool {
+	if options == nil {
+		return false
+	}
+	if _, ok := options["img_op"]; ok {
+		return true
+	}
+	if _, ok := options["img_quality"]; ok {
+		return true
+	}
+	if _, ok := options["img_max"]; ok {
+		return true
+	}
+	if _, ok := options["img_w"]; ok {
+		return true
+	}
+	if _, ok := options["img_h"]; ok {
+		return true
+	}
+	return false
+}
+
+func optString(m map[string]interface{}, key string) (string, bool) {
+	if m == nil {
+		return "", false
+	}
+	v, ok := m[key]
+	if !ok || v == nil {
+		return "", false
+	}
+	switch t := v.(type) {
+	case string:
+		s := strings.TrimSpace(t)
+		if s == "" {
+			return "", false
+		}
+		return s, true
+	default:
+		return "", false
+	}
+}
+
+func optInt(m map[string]interface{}, key string) (int, bool) {
+	if m == nil {
+		return 0, false
+	}
+	v, ok := m[key]
+	if !ok || v == nil {
+		return 0, false
+	}
+	switch t := v.(type) {
+	case int:
+		return t, true
+	case int64:
+		return int(t), true
+	case float64:
+		return int(t), true
+	case string:
+		s := strings.TrimSpace(t)
+		if s == "" {
+			return 0, false
+		}
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	default:
+		return 0, false
+	}
 }
 
 func (c *DefaultConverter) convertAudio(ctx context.Context, inputPath, outputPath string, originalExt, targetExt string) error {
@@ -217,13 +322,41 @@ func (c *DefaultConverter) convertAudio(ctx context.Context, inputPath, outputPa
 	return nil
 }
 
-func (c *DefaultConverter) convertVideo(ctx context.Context, inputPath, outputPath string, originalExt, targetExt string) error {
+func (c *DefaultConverter) convertVideo(ctx context.Context, inputPath, outputPath string, originalExt, targetExt string, options map[string]interface{}) error {
 	_ = originalExt
 	if !c.hasCommand("ffmpeg") {
 		return fmt.Errorf("ffmpeg не установлен")
 	}
 
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-i", inputPath, "-y", outputPath)
+	args := []string{"-i", inputPath}
+	vf := ""
+	if w, ok := optInt(options, "vid_w"); ok && w > 0 {
+		if h, ok := optInt(options, "vid_h"); ok && h > 0 {
+			vf = fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,setsar=1", w, h, w, h)
+		}
+	}
+	if h, ok := optInt(options, "vid_height"); ok && h > 0 {
+		if vf == "" {
+			vf = fmt.Sprintf("scale=-2:%d", h)
+		}
+	}
+	if crf, ok := optInt(options, "vid_crf"); ok && crf > 0 {
+		if crf < 18 {
+			crf = 18
+		}
+		if crf > 40 {
+			crf = 40
+		}
+		if vf != "" {
+			args = append(args, "-vf", vf)
+		}
+		args = append(args, "-c:v", "libx264", "-preset", "veryfast", "-crf", fmt.Sprintf("%d", crf), "-c:a", "aac", "-b:a", "128k")
+	} else if vf != "" {
+		args = append(args, "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-b:a", "128k")
+	}
+	args = append(args, "-y", outputPath)
+
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ошибка ffmpeg: %v, вывод: %s", err, string(output))
@@ -245,18 +378,58 @@ func (c *DefaultConverter) convertVideoToAudio(ctx context.Context, inputPath, o
 	return nil
 }
 
-func (c *DefaultConverter) convertVideoToGif(ctx context.Context, inputPath, outputPath string) error {
+func (c *DefaultConverter) convertVideoToGif(ctx context.Context, inputPath, outputPath string, options map[string]interface{}) error {
 	if !c.hasCommand("ffmpeg") {
 		return fmt.Errorf("ffmpeg не установлен")
 	}
 
-	filter := "fps=12,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"
+	height := 480
+	if hasVideoOptions(options) {
+		op, _ := optString(options, "vid_op")
+		if op == "gif" {
+			if h, ok := optInt(options, "vid_gif_height"); ok && h > 0 {
+				height = h
+			}
+		}
+	}
+	if height < 120 {
+		height = 120
+	}
+	if height > 1080 {
+		height = 1080
+	}
+	filter := fmt.Sprintf("fps=12,scale=-2:%d:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse", height)
 	cmd := exec.CommandContext(ctx, "ffmpeg", "-i", inputPath, "-vf", filter, "-loop", "0", "-y", outputPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ошибка ffmpeg (video->gif): %v, вывод: %s", err, string(output))
 	}
 	return nil
+}
+
+func hasVideoOptions(options map[string]interface{}) bool {
+	if options == nil {
+		return false
+	}
+	if _, ok := options["vid_op"]; ok {
+		return true
+	}
+	if _, ok := options["vid_height"]; ok {
+		return true
+	}
+	if _, ok := options["vid_crf"]; ok {
+		return true
+	}
+	if _, ok := options["vid_gif_height"]; ok {
+		return true
+	}
+	if _, ok := options["vid_w"]; ok {
+		return true
+	}
+	if _, ok := options["vid_h"]; ok {
+		return true
+	}
+	return false
 }
 
 func (c *DefaultConverter) convertDocument(ctx context.Context, inputPath, outputPath string, originalExt, targetExt string) error {
