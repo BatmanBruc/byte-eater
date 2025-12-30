@@ -1989,6 +1989,18 @@ func (bh *Handlers) startManualBatchTimer(b *bot.Bot, sessionID string) {
 	bh.batchMu.Unlock()
 }
 
+func (bh *Handlers) resetManualBatchTimer(b *bot.Bot, sessionID string) {
+	key := "mb:" + strings.TrimSpace(sessionID)
+	bh.batchMu.Lock()
+	if t, ok := bh.batchTimers[key]; ok && t != nil {
+		t.Stop()
+	}
+	bh.batchTimers[key] = time.AfterFunc(10*time.Second, func() {
+		bh.manualBatchFinalize(b, sessionID, true)
+	})
+	bh.batchMu.Unlock()
+}
+
 func (bh *Handlers) stopManualBatchTimer(sessionID string) {
 	key := "mb:" + strings.TrimSpace(sessionID)
 	bh.batchMu.Lock()
@@ -2031,7 +2043,10 @@ func (bh *Handlers) manualBatchAddFiles(ctx context.Context, b *bot.Bot, session
 	_ = bh.store.UpdateSession(session)
 
 	if expected > 0 && len(list) >= expected {
+		bh.stopManualBatchTimer(session.ID)
 		bh.manualBatchFinalize(b, session.ID, false)
+	} else if len(list) > 0 {
+		bh.resetManualBatchTimer(b, session.ID)
 	}
 }
 
