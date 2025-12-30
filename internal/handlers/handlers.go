@@ -447,6 +447,11 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 	}
 
 	format = strings.ToLower(format)
+
+	if format == "batch_sep" || format == "batch_all" {
+		bh.handleBatchChoice(ctx, b, update, session, lang, taskID, format)
+		return
+	}
 	action := ""
 	targetExt := format
 	quality := 0
@@ -483,6 +488,19 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 		action = "vid_gif"
 		targetExt = strings.ToLower(strings.TrimSpace(p[1]))
 		videoGIFHeight, _ = strconv.Atoi(strings.TrimSpace(p[2]))
+	}
+	pdfZipFmt := ""
+	if len(p) == 2 && p[0] == "pdfzip" {
+		action = "pdf_zip"
+		targetExt = "zip"
+		pdfZipFmt = strings.ToLower(strings.TrimSpace(p[1]))
+		if pdfZipFmt != "png" && pdfZipFmt != "jpg" && pdfZipFmt != "jpeg" {
+			_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackInvalidButtonData(lang))
+			return
+		}
+		if pdfZipFmt == "jpeg" {
+			pdfZipFmt = "jpg"
+		}
 	}
 	profile := ""
 	if len(p) >= 2 && p[0] == "pimg" {
@@ -546,6 +564,13 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 
 	if task.Options == nil {
 		task.Options = map[string]interface{}{}
+	}
+
+	if v, ok := task.Options["batch_mode"]; ok {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) == "all" {
+			bh.handleBatchFormatSelection(ctx, b, update, session, lang, task, targetExt)
+			return
+		}
 	}
 	fileSize := int64(0)
 	if v, ok := task.Options["file_size"]; ok {
@@ -633,6 +658,7 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 	delete(task.Options, "vid_gif_height")
 	delete(task.Options, "vid_w")
 	delete(task.Options, "vid_h")
+	delete(task.Options, "pdf_zip_fmt")
 	if action != "" {
 		if action == "compress" || action == "resize" {
 			task.Options["img_op"] = action
@@ -683,6 +709,9 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 				task.Options["vid_w"] = vidW
 				task.Options["vid_h"] = vidH
 			}
+		}
+		if action == "pdf_zip" {
+			task.Options["pdf_zip_fmt"] = pdfZipFmt
 		}
 	}
 	if !unlimited && bh.billing != nil {
@@ -1187,6 +1216,258 @@ func adminSecretOK(secret string) bool {
 	return secret == expected
 }
 
+func (bh *Handlers) handleBatchChoice(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session, lang i18n.Lang, batchTaskID string, choice string) {
+	task, err := bh.store.GetTask(batchTaskID)
+	if err != nil || task == nil || task.Options == nil {
+		_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackTaskNotFound(lang))
+		return
+	}
+	if task.SessionID != session.ID {
+		_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackTaskNotInSession(lang))
+		return
+	}
+
+	files := parseBatchFiles(task.Options["batch_files"])
+	if len(files) < 2 {
+		_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackInvalidButtonData(lang))
+		return
+	}
+
+	if choice == "batch_sep" {
+		_ = bh.store.DeleteTask(task.ID)
+		for _, f := range files {
+			bh.createAndAskFormatForSingleFile(ctx, b, session, lang, f)
+		}
+		_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, "")
+		return
+	}
+
+	if choice == "batch_all" {
+		task.Options["batch_mode"] = "all"
+		_ = bh.store.UpdateTask(task)
+		buttons := formats.GetBatchButtonsBySourceExtWithCredits(task.OriginalExt, task.ID, files, lang)
+		if len(buttons) == 0 {
+			_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.ErrorNoConversionOptions(lang, ""))
+			return
+		}
+		keyboard := bh.buildInlineKeyboard(buttons)
+		text := messages.BatchChooseFormat(lang, task.OriginalExt, len(files))
+		if bh.billing != nil {
+			unlimited, err := bh.billing.IsUnlimited(session.UserID)
+			if err == nil && unlimited {
+				text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
+			} else if err == nil {
+				rem, err := bh.billing.GetOrResetBalance(session.UserID)
+				if err == nil {
+					text = text + "\n\n" + messages.CreditsRemainingLine(lang, rem)
+					if rem <= 0 {
+						text = text + "\n" + messages.NoCreditsHint(lang)
+					}
+				}
+			}
+		}
+
+		if update.CallbackQuery.Message.Message != nil {
+			msg := update.CallbackQuery.Message.Message
+			_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
+				ChatID:    msg.Chat.ID,
+				MessageID: msg.ID,
+				Text:      text,
+				ParseMode: messages.ParseModeHTML,
+				ReplyMarkup: &models.InlineKeyboardMarkup{
+					InlineKeyboard: keyboard.InlineKeyboard,
+				},
+			})
+		}
+		_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, "")
+		return
+	}
+
+	_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackInvalidButtonData(lang))
+}
+
+type batchFileParsed struct {
+	FileID   string
+	FileName string
+	FileSize int64
+}
+
+func parseBatchFiles(v interface{}) []formats.BatchFile {
+	if v == nil {
+		return nil
+	}
+	out := make([]formats.BatchFile, 0)
+	switch t := v.(type) {
+	case []formats.BatchFile:
+		return t
+	case []interface{}:
+		for _, it := range t {
+			m, ok := it.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			id, _ := m["file_id"].(string)
+			name, _ := m["file_name"].(string)
+			size := int64(0)
+			if sv, ok := m["file_size"]; ok {
+				switch st := sv.(type) {
+				case int64:
+					size = st
+				case int:
+					size = int64(st)
+				case float64:
+					size = int64(st)
+				}
+			}
+			id = strings.TrimSpace(id)
+			name = strings.TrimSpace(name)
+			if id == "" {
+				continue
+			}
+			out = append(out, formats.BatchFile{FileID: id, FileName: name, FileSize: size})
+		}
+	}
+	return out
+}
+
+func (bh *Handlers) createAndAskFormatForSingleFile(ctx context.Context, b *bot.Bot, session *types.Session, lang i18n.Lang, f formats.BatchFile) {
+	fileName := strings.TrimSpace(f.FileName)
+	if fileName == "" {
+		fileName = fmt.Sprintf("file_%d.%s", time.Now().UnixNano(), strings.ToLower(strings.TrimSpace(session.TargetExt)))
+	}
+	ext := bh.getExtensionFromFileName(fileName)
+	task, err := bh.store.SetProcessingFile(session.ID, f.FileID, fileName, f.FileSize)
+	if err != nil {
+		return
+	}
+	targets := formats.GetTargetFormatsForSourceExt(ext)
+	priceMap := map[string]interface{}{}
+	for _, t := range targets {
+		credits, _ := pricing.Credits(ext, t, f.FileSize)
+		if credits > 0 {
+			priceMap[strings.ToUpper(t)] = credits
+		}
+	}
+	if task.Options == nil {
+		task.Options = map[string]interface{}{}
+	}
+	task.Options["pricing"] = priceMap
+	task.Options["lang"] = string(lang)
+	_ = bh.store.UpdateTask(task)
+	buttons := formats.GetButtonsForSourceExtWithCredits(ext, task.ID, f.FileSize, lang)
+	if len(buttons) == 0 {
+		return
+	}
+	keyboard := bh.buildInlineKeyboard(buttons)
+	text := messages.FileReceivedChooseFormat(lang, fileName)
+	if bh.billing != nil {
+		unlimited, err := bh.billing.IsUnlimited(session.UserID)
+		if err == nil && unlimited {
+			text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
+		} else if err == nil {
+			rem, err := bh.billing.GetOrResetBalance(session.UserID)
+			if err == nil {
+				text = text + "\n\n" + messages.CreditsRemainingLine(lang, rem)
+				if rem <= 0 {
+					text = text + "\n" + messages.NoCreditsHint(lang)
+				}
+			}
+		}
+	}
+	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:      session.ChatID,
+		Text:        text,
+		ParseMode:   messages.ParseModeHTML,
+		ReplyMarkup: keyboard,
+	})
+}
+
+func (bh *Handlers) handleBatchFormatSelection(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session, lang i18n.Lang, batchTask *types.Task, targetExt string) {
+	files := parseBatchFiles(batchTask.Options["batch_files"])
+	if len(files) < 2 {
+		_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackInvalidButtonData(lang))
+		return
+	}
+	totalCredits := 0
+	heavyAny := false
+	for _, f := range files {
+		c, h := pricing.Credits(batchTask.OriginalExt, targetExt, f.FileSize)
+		totalCredits += c
+		if h {
+			heavyAny = true
+		}
+	}
+	unlimited := false
+	remaining := 0
+	if totalCredits > 0 && bh.billing != nil {
+		r, u, err := bh.billing.Consume(session.UserID, totalCredits)
+		if err != nil {
+			if err == store.ErrInsufficientCredits {
+				_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackInsufficientCredits(lang, r))
+				return
+			}
+			_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackBillingError(lang))
+			return
+		}
+		unlimited = u
+		remaining = r
+	}
+
+	for _, f := range files {
+		task := &types.Task{
+			SessionID:   session.ID,
+			State:       types.StateProcessing,
+			FileID:      f.FileID,
+			FileName:    f.FileName,
+			OriginalExt: batchTask.OriginalExt,
+			TargetExt:   targetExt,
+			Options: map[string]interface{}{
+				"file_size":           f.FileSize,
+				"lang":                string(lang),
+				"unlimited":           unlimited,
+				"priority":            unlimited,
+				"credits":             0,
+				"is_heavy":            heavyAny,
+				"credits_remaining":   remaining,
+				"batch_parent_task":   batchTask.ID,
+				"batch_total_credits": totalCredits,
+			},
+		}
+		_ = bh.store.CreateTask(task)
+		bh.scheduler.EnqueueTask(task.ID, 0, 0, task.FileName, lang, unlimited)
+	}
+
+	_ = bh.store.DeleteTask(batchTask.ID)
+
+	if update.CallbackQuery.Message.Message != nil {
+		msg := update.CallbackQuery.Message.Message
+		text := messages.BatchStarted(lang, len(files))
+		if totalCredits > 0 {
+			text = text + "\n\n" + messages.TaskTypeLine(lang, heavyAny) + "\n" + messages.CreditsCostLine(lang, totalCredits)
+		}
+		if bh.billing != nil {
+			if unlimited {
+				text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
+			} else {
+				text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
+				if remaining <= 0 {
+					text = text + "\n" + messages.NoCreditsHint(lang)
+				}
+			}
+		}
+		_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    msg.Chat.ID,
+			MessageID: msg.ID,
+			Text:      text,
+			ParseMode: messages.ParseModeHTML,
+			ReplyMarkup: &models.InlineKeyboardMarkup{
+				InlineKeyboard: [][]models.InlineKeyboardButton{},
+			},
+		})
+	}
+	_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, "")
+}
+
 func (bh *Handlers) HandleFile(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session) {
 	filesInfo, hasFiles := contextkeys.GetFilesInfo(ctx)
 	lang := langFromSessionOrCtx(ctx, session)
@@ -1198,6 +1479,208 @@ func (bh *Handlers) HandleFile(ctx context.Context, b *bot.Bot, update *models.U
 		})
 		return
 	}
+
+	if session.Options == nil {
+		session.Options = map[string]interface{}{}
+	}
+
+	bh.appendToUserBatch(ctx, b, update.Message.Chat.ID, session, lang, filesInfo.Files)
+}
+
+func (bh *Handlers) appendToUserBatch(ctx context.Context, b *bot.Bot, chatID int64, session *types.Session, lang i18n.Lang, files []contextkeys.FileInfo) {
+	if session == nil || len(files) == 0 {
+		return
+	}
+	if session.Options == nil {
+		session.Options = map[string]interface{}{}
+	}
+
+	taskID := ""
+	if v, ok := session.Options["collect_task_id"]; ok {
+		if s, ok := v.(string); ok {
+			taskID = strings.TrimSpace(s)
+		}
+	}
+
+	var task *types.Task
+	if taskID != "" {
+		t, err := bh.store.GetTask(taskID)
+		if err == nil && t != nil && t.SessionID == session.ID && t.Options != nil {
+			task = t
+		} else {
+			taskID = ""
+		}
+	}
+
+	if task == nil {
+		task = &types.Task{
+			SessionID:   session.ID,
+			State:       types.StateChooseExt,
+			FileID:      "",
+			FileName:    "batch",
+			OriginalExt: "",
+			TargetExt:   "",
+			Options: map[string]interface{}{
+				"lang":           string(lang),
+				"collecting":     true,
+				"collect_worker": false,
+				"batch_files":    []interface{}{},
+			},
+		}
+		_ = bh.store.CreateTask(task)
+		taskID = task.ID
+		session.Options["collect_task_id"] = taskID
+		_ = bh.store.UpdateSession(session)
+
+		msg, _ := b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
+			Text:      messages.BatchCollecting(lang),
+			ParseMode: messages.ParseModeHTML,
+		})
+		if msg != nil {
+			task.Options["collect_msg_id"] = msg.ID
+			task.Options["collect_chat_id"] = msg.Chat.ID
+			_ = bh.store.UpdateTask(task)
+		}
+	}
+
+	list := []interface{}{}
+	if v, ok := task.Options["batch_files"]; ok {
+		if arr, ok := v.([]interface{}); ok {
+			list = arr
+		}
+	}
+	now := time.Now().UnixNano()
+	for _, fi := range files {
+		fileName := strings.TrimSpace(fi.FileName)
+		if strings.EqualFold(fileName, "photo.jpg") {
+			fileName = fmt.Sprintf("photo_%d.jpg", time.Now().UnixNano())
+		}
+		list = append(list, map[string]interface{}{
+			"file_id":   fi.FileID,
+			"file_name": fileName,
+			"file_size": fi.FileSize,
+		})
+	}
+	task.Options["batch_files"] = list
+	task.Options["collect_last"] = now
+	task.Options["lang"] = string(lang)
+	_ = bh.store.UpdateTask(task)
+
+	worker := false
+	if v, ok := task.Options["collect_worker"]; ok {
+		if b, ok := v.(bool); ok && b {
+			worker = true
+		}
+	}
+	if !worker {
+		task.Options["collect_worker"] = true
+		_ = bh.store.UpdateTask(task)
+		go bh.batchCollectorLoop(b, session.ID, task.ID)
+	}
+}
+
+func (bh *Handlers) batchCollectorLoop(b *bot.Bot, sessionID string, collectorTaskID string) {
+	window := 2500 * time.Millisecond
+	for {
+		time.Sleep(window)
+		task, err := bh.store.GetTask(collectorTaskID)
+		if err != nil || task == nil || task.Options == nil {
+			return
+		}
+		last := int64(0)
+		if v, ok := task.Options["collect_last"]; ok {
+			switch t := v.(type) {
+			case int64:
+				last = t
+			case int:
+				last = int64(t)
+			case float64:
+				last = int64(t)
+			}
+		}
+		if last == 0 {
+			continue
+		}
+		if time.Since(time.Unix(0, last)) < window {
+			continue
+		}
+		bh.finalizeUserBatch(b, sessionID, collectorTaskID)
+		return
+	}
+}
+
+func (bh *Handlers) finalizeUserBatch(b *bot.Bot, sessionID string, collectorTaskID string) {
+	task, err := bh.store.GetTask(collectorTaskID)
+	if err != nil || task == nil || task.Options == nil {
+		return
+	}
+	session, err := bh.store.GetSession(sessionID)
+	if err != nil || session == nil {
+		return
+	}
+
+	lang := i18n.EN
+	if v, ok := task.Options["lang"]; ok {
+		if s, ok := v.(string); ok {
+			lang = i18n.Parse(s)
+		}
+	}
+
+	chatID := session.ChatID
+	msgID := 0
+	if v, ok := task.Options["collect_msg_id"]; ok {
+		switch t := v.(type) {
+		case int:
+			msgID = t
+		case int64:
+			msgID = int(t)
+		case float64:
+			msgID = int(t)
+		}
+	}
+	if v, ok := task.Options["collect_chat_id"]; ok {
+		switch t := v.(type) {
+		case int64:
+			chatID = t
+		case int:
+			chatID = int64(t)
+		case float64:
+			chatID = int64(t)
+		}
+	}
+
+	files := parseBatchFiles(task.Options["batch_files"])
+	if len(files) == 0 {
+		_ = bh.store.DeleteTask(task.ID)
+		delete(session.Options, "collect_task_id")
+		_ = bh.store.UpdateSession(session)
+		return
+	}
+
+	type g struct {
+		ext   string
+		files []formats.BatchFile
+	}
+	byExt := map[string][]formats.BatchFile{}
+	order := make([]string, 0)
+	for _, f := range files {
+		ext := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(bh.getExtensionFromFileName(f.FileName)), "."))
+		if ext == "" {
+			ext = "_unknown_"
+		}
+		if _, ok := byExt[ext]; !ok {
+			order = append(order, ext)
+		}
+		byExt[ext] = append(byExt[ext], f)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	delete(session.Options, "collect_task_id")
+	_ = bh.store.UpdateSession(session)
+	_ = bh.store.DeleteTask(task.ID)
 
 	unlimited := false
 	remaining := 0
@@ -1214,81 +1697,71 @@ func (bh *Handlers) HandleFile(ctx context.Context, b *bot.Bot, update *models.U
 		}
 	}
 
-	for _, fileInfo := range filesInfo.Files {
-		fileName := strings.TrimSpace(fileInfo.FileName)
-		if strings.EqualFold(fileName, "photo.jpg") {
-			fileName = fmt.Sprintf("photo_%d.jpg", time.Now().Unix())
-		}
-		ext := bh.getExtensionFromFileName(fileName)
-		category := formats.GetCategoryByExtension(ext)
-		if category == "" {
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID:    update.Message.Chat.ID,
-				Text:      messages.ErrorCannotDetectFileType(lang, fileName),
-				ParseMode: messages.ParseModeHTML,
-			})
-			continue
-		}
+	if msgID != 0 {
+		_, _ = b.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: chatID, MessageID: msgID})
+	}
 
-		task, err := bh.store.SetProcessingFile(session.ID, fileInfo.FileID, fileName, fileInfo.FileSize)
-		if err != nil {
-			log.Printf("Error setting processing file: %v", err)
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID:    update.Message.Chat.ID,
-				Text:      messages.ErrorDefault(lang),
-				ParseMode: messages.ParseModeHTML,
-			})
-			continue
-		}
-
-		targets := formats.GetTargetFormatsForSourceExt(ext)
-		priceMap := map[string]interface{}{}
-		for _, t := range targets {
-			credits, _ := pricing.Credits(ext, t, fileInfo.FileSize)
-			if credits > 0 {
-				priceMap[strings.ToUpper(t)] = credits
-			}
-		}
-		if task.Options == nil {
-			task.Options = map[string]interface{}{}
-		}
-		task.Options["pricing"] = priceMap
-		task.Options["lang"] = string(lang)
-		_ = bh.store.UpdateTask(task)
-
-		buttons := formats.GetButtonsForSourceExtWithCredits(ext, task.ID, fileInfo.FileSize, lang)
-		if len(buttons) == 0 {
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID:    update.Message.Chat.ID,
-				Text:      messages.ErrorNoConversionOptions(lang, fileName),
-				ParseMode: messages.ParseModeHTML,
-			})
-			continue
-		}
-
-		keyboard := bh.buildInlineKeyboard(buttons)
-
-		text := messages.FileReceivedChooseFormat(lang, fileName)
-		if bh.billing != nil {
-			if unlimited {
-				text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
-			} else {
-				text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
-				if remaining <= 0 {
-					text = text + "\n" + messages.NoCreditsHint(lang)
+	for _, extKey := range order {
+		groupFiles := byExt[extKey]
+		if len(groupFiles) > 1 && extKey != "_unknown_" {
+			targets := formats.GetTargetFormatsForSourceExt(extKey)
+			if len(targets) > 0 {
+				bt := &types.Task{
+					SessionID:   session.ID,
+					State:       types.StateChooseExt,
+					FileID:      groupFiles[0].FileID,
+					FileName:    fmt.Sprintf("%d files.%s", len(groupFiles), extKey),
+					OriginalExt: extKey,
+					TargetExt:   "",
+					Options: map[string]interface{}{
+						"lang":       string(lang),
+						"batch_mode": "",
+					},
 				}
+				batchFiles := make([]map[string]interface{}, 0, len(groupFiles))
+				for _, gf := range groupFiles {
+					batchFiles = append(batchFiles, map[string]interface{}{
+						"file_id":   gf.FileID,
+						"file_name": gf.FileName,
+						"file_size": gf.FileSize,
+					})
+				}
+				bt.Options["batch_files"] = batchFiles
+				_ = bh.store.CreateTask(bt)
+
+				rows := [][]models.InlineKeyboardButton{
+					{
+						{Text: " " + messages.BatchBtnAll(lang) + " ", CallbackData: "batch_all_for_" + bt.ID},
+					},
+					{
+						{Text: " " + messages.BatchBtnSeparate(lang) + " ", CallbackData: "batch_sep_for_" + bt.ID},
+					},
+				}
+				text := messages.BatchReceivedChoice(lang, extKey, len(groupFiles))
+				if bh.billing != nil {
+					if unlimited {
+						text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
+					} else {
+						text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
+						if remaining <= 0 {
+							text = text + "\n" + messages.NoCreditsHint(lang)
+						}
+					}
+				}
+				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+					ChatID:    chatID,
+					Text:      text,
+					ParseMode: messages.ParseModeHTML,
+					ReplyMarkup: &models.InlineKeyboardMarkup{
+						InlineKeyboard: rows,
+					},
+				})
+				continue
 			}
 		}
 
-		sent, _ := b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:      update.Message.Chat.ID,
-			Text:        text,
-			ParseMode:   messages.ParseModeHTML,
-			ReplyMarkup: keyboard,
-		})
-		if sent != nil {
-			bh.addPendingSelection(session, sent.ID, task.ID)
-			_ = bh.store.UpdateSession(session)
+		for _, f := range groupFiles {
+			bh.createAndAskFormatForSingleFile(ctx, b, session, lang, f)
 		}
 	}
 }

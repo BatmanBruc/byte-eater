@@ -23,6 +23,12 @@ type FormatButton struct {
 	Heavy        bool
 }
 
+type BatchFile struct {
+	FileID   string
+	FileName string
+	FileSize int64
+}
+
 func normalizeExt(ext string) string {
 	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(ext), "."))
 }
@@ -214,6 +220,9 @@ func GetButtonsForSourceExtWithCredits(sourceExt string, taskID string, fileSize
 	if containsCaseInsensitive(videoFormats(), sourceExt) {
 		return getVideoActionButtonsWithCredits(sourceExt, taskID, fileSize, lang)
 	}
+	if sourceExt == "pdf" {
+		return getPdfActionButtonsWithCredits(taskID, fileSize, lang)
+	}
 	return GetFormatButtonsBySourceExtWithCredits(sourceExt, taskID, fileSize)
 }
 
@@ -370,6 +379,68 @@ func getVideoActionButtonsWithCredits(sourceExt string, taskID string, fileSize 
 	return buttons
 }
 
+func getPdfActionButtonsWithCredits(taskID string, fileSize int64, lang i18n.Lang) []FormatButton {
+	buttons := make([]FormatButton, 0)
+	{
+		credits, heavy := pricing.Credits("pdf", "txt", fileSize)
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText("TXT", credits, heavy),
+			CallbackData: "txt_for_" + taskID,
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+	}
+	{
+		credits, heavy := pricing.Credits("pdf", "zip", fileSize)
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(pick(lang, "🖼 PNG (ZIP)", "🖼 PNG (ZIP)"), credits, heavy),
+			CallbackData: "pdfzip_png_for_" + taskID,
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(pick(lang, "🖼 JPG (ZIP)", "🖼 JPG (ZIP)"), credits, heavy),
+			CallbackData: "pdfzip_jpg_for_" + taskID,
+			Credits:      credits,
+			Heavy:        heavy,
+		})
+	}
+	return buttons
+}
+
+func GetBatchButtonsBySourceExtWithCredits(sourceExt string, taskID string, files []BatchFile, lang i18n.Lang) []FormatButton {
+	sourceExt = normalizeExt(sourceExt)
+	if len(files) == 0 {
+		return nil
+	}
+
+	targets := GetTargetFormatsForSourceExt(sourceExt)
+	if len(targets) == 0 {
+		return nil
+	}
+
+	buttons := make([]FormatButton, 0, len(targets))
+	for _, t := range targets {
+		total := 0
+		heavyAny := false
+		for _, f := range files {
+			c, h := pricing.Credits(sourceExt, t, f.FileSize)
+			total += c
+			if h {
+				heavyAny = true
+			}
+		}
+		label := strings.ToUpper(t)
+		buttons = append(buttons, FormatButton{
+			Text:         formatButtonText(label, total, heavyAny),
+			CallbackData: strings.ToLower(t) + "_for_" + taskID,
+			Credits:      total,
+			Heavy:        heavyAny,
+		})
+	}
+	return buttons
+}
+
 func GetFormatButtonsByList(formatList []string, taskID string) []FormatButton {
 	buttons := make([]FormatButton, 0, len(formatList))
 	for _, format := range formatList {
@@ -416,7 +487,7 @@ var SupportedFormats = map[string][]FormatCategory{
 		{
 			Name:    "Document",
 			Icon:    "💼",
-			Formats: []string{"XLSX", "XLS", "TXT", "RTF", "DOC", "DOCX", "ODT", "PDF", "ODS", "TORRENT"},
+			Formats: []string{"XLSX", "XLS", "TXT", "RTF", "DOC", "DOCX", "ODT", "PDF", "ODS", "ZIP", "TORRENT"},
 		},
 	},
 	"presentation": {

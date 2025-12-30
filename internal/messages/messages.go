@@ -91,6 +91,51 @@ func FileReceivedChooseFormat(lang i18n.Lang, fileName string) string {
 	return pick(lang, "📥 <b>Файл получен</b>\n", "📥 <b>File received</b>\n") + FileLine(lang, fileName) + pick(lang, "\n\nВыберите формат для конвертации:", "\n\nChoose the target format:")
 }
 
+func BatchReceivedChoice(lang i18n.Lang, ext string, count int) string {
+	ext = strings.TrimSpace(ext)
+	if ext != "" && !strings.HasPrefix(ext, ".") {
+		ext = "." + ext
+	}
+	if lang == i18n.RU {
+		return fmt.Sprintf("📦 <b>Пакет файлов</b>\nВы отправили <b>%d</b> файлов %s.\n\nКак конвертировать?", count, Escape(ext))
+	}
+	return fmt.Sprintf("📦 <b>Batch</b>\nYou sent <b>%d</b> files %s.\n\nHow do you want to convert?", count, Escape(ext))
+}
+
+func BatchBtnAll(lang i18n.Lang) string {
+	return pick(lang, "🧩 Один формат для всех", "🧩 One format for all")
+}
+
+func BatchBtnSeparate(lang i18n.Lang) string {
+	return pick(lang, "📄 По отдельности", "📄 Separately")
+}
+
+func BatchChooseFormat(lang i18n.Lang, ext string, count int) string {
+	ext = strings.TrimSpace(ext)
+	if ext != "" && !strings.HasPrefix(ext, ".") {
+		ext = "." + ext
+	}
+	if lang == i18n.RU {
+		return fmt.Sprintf("🧩 <b>Один формат для всех</b>\nФайлов: <b>%d</b> %s\n\nВыберите формат:", count, Escape(ext))
+	}
+	return fmt.Sprintf("🧩 <b>One format for all</b>\nFiles: <b>%d</b> %s\n\nChoose format:", count, Escape(ext))
+}
+
+func BatchStarted(lang i18n.Lang, count int) string {
+	if lang == i18n.RU {
+		return fmt.Sprintf("✅ Запущено конвертаций: <b>%d</b>\nРезультаты придут отдельными файлами.", count)
+	}
+	return fmt.Sprintf("✅ Conversions started: <b>%d</b>\nYou will receive results as separate files.", count)
+}
+
+func BatchCollecting(lang i18n.Lang) string {
+	return pick(
+		lang,
+		"📦 <b>Собираю файлы</b>\nЕсли Вы отправляете пачку — продолжайте отправку.\nЯ подожду немного и затем предложу варианты конвертации.",
+		"📦 <b>Collecting files</b>\nIf you're sending a batch, keep sending.\nI'll wait a bit and then show conversion options.",
+	)
+}
+
 func ErrorCannotDetectFileType(lang i18n.Lang, fileName string) string {
 	return pick(lang, "🚫 <b>Не удалось определить тип файла</b>\n", "🚫 <b>Couldn't detect file type</b>\n") + FileLine(lang, fileName)
 }

@@ -1,6 +1,7 @@
 package converter
 
 import (
+	"archive/zip"
 	"context"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -151,6 +153,10 @@ func (c *DefaultConverter) convertFile(ctx context.Context, inputPath, outputPat
 
 	if c.isEbookFormat(originalExt) && targetExt == "pdf" {
 		return c.convertEbook(ctx, inputPath, outputPath, originalExt, targetExt)
+	}
+
+	if originalExt == "pdf" && targetExt == "zip" {
+		return c.convertPdfToImagesZip(ctx, inputPath, outputPath, options)
 	}
 
 	if c.isDocumentFormat(originalExt) && c.isDocumentFormat(targetExt) {
@@ -430,6 +436,91 @@ func hasVideoOptions(options map[string]interface{}) bool {
 		return true
 	}
 	return false
+}
+
+func (c *DefaultConverter) convertPdfToImagesZip(ctx context.Context, inputPath, outputPath string, options map[string]interface{}) error {
+	if !c.hasCommand("pdftoppm") {
+		return fmt.Errorf("pdftoppm не установлен")
+	}
+
+	fmtOpt, _ := optString(options, "pdf_zip_fmt")
+	fmtOpt = strings.ToLower(strings.TrimSpace(fmtOpt))
+	if fmtOpt == "" {
+		fmtOpt = "png"
+	}
+	if fmtOpt != "png" && fmtOpt != "jpg" && fmtOpt != "jpeg" {
+		return fmt.Errorf("неподдерживаемый формат для pdf zip: %s", fmtOpt)
+	}
+	if fmtOpt == "jpeg" {
+		fmtOpt = "jpg"
+	}
+
+	outputDir := filepath.Dir(outputPath)
+	prefix := strings.TrimSuffix(filepath.Base(outputPath), filepath.Ext(outputPath))
+	if prefix == "" {
+		prefix = "pages"
+	}
+	outPrefix := filepath.Join(outputDir, prefix+"_page")
+
+	args := []string{}
+	if fmtOpt == "png" {
+		args = append(args, "-png")
+	} else {
+		args = append(args, "-jpeg")
+	}
+	args = append(args, "-r", "150", inputPath, outPrefix)
+
+	cmd := exec.CommandContext(ctx, "pdftoppm", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ошибка pdftoppm: %v, вывод: %s", err, string(output))
+	}
+
+	pattern := outPrefix + "-*." + fmtOpt
+	files, _ := filepath.Glob(pattern)
+	if len(files) == 0 && fmtOpt == "jpg" {
+		files, _ = filepath.Glob(outPrefix + "-*.jpeg")
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("pdftoppm не создал файлы страниц")
+	}
+	sort.Strings(files)
+	defer func() {
+		for _, f := range files {
+			_ = os.Remove(f)
+		}
+	}()
+
+	zf, err := os.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	defer zf.Close()
+
+	zw := zip.NewWriter(zf)
+	defer zw.Close()
+
+	for i, fp := range files {
+		ext := filepath.Ext(fp)
+		if ext == "" {
+			ext = "." + fmtOpt
+		}
+		name := fmt.Sprintf("page_%03d%s", i+1, ext)
+		w, err := zw.Create(name)
+		if err != nil {
+			return err
+		}
+		r, err := os.Open(fp)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(w, r)
+		_ = r.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+	}
+	return nil
 }
 
 func (c *DefaultConverter) convertDocument(ctx context.Context, inputPath, outputPath string, originalExt, targetExt string) error {
