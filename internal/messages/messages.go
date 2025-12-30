@@ -304,6 +304,10 @@ func MenuBtnAbout(lang i18n.Lang) string {
 	return pick(lang, "ℹ️ О боте", "ℹ️ About")
 }
 
+func MenuBtnBatch(lang i18n.Lang) string {
+	return pick(lang, "📦 Конвертировать несколько файлов", "📦 Convert multiple files")
+}
+
 func MenuBtnBack(lang i18n.Lang) string {
 	return pick(lang, "⬅️ Назад", "⬅️ Back")
 }
@@ -320,6 +324,32 @@ func AboutCreditsBlock(lang i18n.Lang) string {
 		"💳 <b>Кредиты</b>\n- Без подписки: 50 кредитов в сутки (обновляются каждый день)\n- Подписка: кредиты не нужны (безлимит)\n\nКоманды: <code>/balance</code>, <code>/menu</code>",
 		"💳 <b>Credits</b>\n- No subscription: 50 credits per day (refreshed daily)\n- Subscription: credits are not needed (unlimited)\n\nCommands: <code>/balance</code>, <code>/menu</code>",
 	)
+}
+
+func BatchHowManyPrompt(lang i18n.Lang) string {
+	return pick(
+		lang,
+		"📦 <b>Конвертация нескольких файлов</b>\n\nСколько файлов Вы отправите?\n<b>Важно:</b> укажите точное число, иначе часть файлов может не попасть.\n\nПосле этого отправьте файлы (желательно одним сообщением/альбомом).\nТаймер: <b>10 секунд</b>.",
+		"📦 <b>Batch conversion</b>\n\nHow many files will you send?\n<b>Important:</b> enter the exact number, otherwise some files may be missed.\n\nThen send the files (preferably as one message/album).\nTimeout: <b>10 seconds</b>.",
+	)
+}
+
+func BatchCountAccepted(lang i18n.Lang, n int) string {
+	if lang == i18n.RU {
+		return fmt.Sprintf("✅ Ок. Жду <b>%d</b> файлов.\nОтправьте их сейчас. Таймер: <b>10 секунд</b>.", n)
+	}
+	return fmt.Sprintf("✅ OK. Waiting for <b>%d</b> files.\nSend them now. Timeout: <b>10 seconds</b>.", n)
+}
+
+func BatchCountInvalid(lang i18n.Lang) string {
+	return pick(lang, "🚫 Введите число файлов (например: <code>3</code>)", "🚫 Enter the number of files (e.g. <code>3</code>)")
+}
+
+func BatchTimeout(lang i18n.Lang, got int, expected int) string {
+	if lang == i18n.RU {
+		return fmt.Sprintf("⏱ Таймер истёк. Получено файлов: <b>%d</b> из <b>%d</b>.", got, expected)
+	}
+	return fmt.Sprintf("⏱ Timeout. Received files: <b>%d</b> of <b>%d</b>.", got, expected)
 }
 
 func SubscriptionInfo(lang i18n.Lang, unlimited bool) string {

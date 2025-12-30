@@ -218,6 +218,9 @@ func (bh *Handlers) buildMenuKeyboard(lang i18n.Lang, withBack bool) models.Inli
 	pad := func(s string) string { return "   " + s + "   " }
 	rows := make([][]models.InlineKeyboardButton, 0, 4)
 	rows = append(rows, []models.InlineKeyboardButton{
+		{Text: pad(messages.MenuBtnBatch(lang)), CallbackData: "menu_batch"},
+	})
+	rows = append(rows, []models.InlineKeyboardButton{
 		{Text: pad(messages.MenuBtnSubscription(lang)), CallbackData: "menu_sub"},
 	})
 	rows = append(rows, []models.InlineKeyboardButton{
@@ -266,6 +269,24 @@ func (bh *Handlers) HandleMenuClick(ctx context.Context, b *bot.Bot, update *mod
 	keyboard := bh.buildMenuKeyboard(lang, false)
 
 	switch data {
+	case "menu_batch":
+		if session.Options == nil {
+			session.Options = map[string]interface{}{}
+		}
+		delete(session.Options, "mb_state")
+		delete(session.Options, "mb_expected")
+		delete(session.Options, "mb_files")
+		_ = bh.store.UpdateSession(session)
+
+		session.Options["mb_state"] = "await_count"
+		_ = bh.store.UpdateSession(session)
+		_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, "")
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    session.ChatID,
+			Text:      messages.BatchHowManyPrompt(lang),
+			ParseMode: messages.ParseModeHTML,
+		})
+		return
 	case "menu_sub":
 		active := false
 		var expiresAt *time.Time
@@ -1368,12 +1389,16 @@ func (bh *Handlers) createAndAskFormatForSingleFile(ctx context.Context, b *bot.
 			}
 		}
 	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+	sent, _ := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      session.ChatID,
 		Text:        text,
 		ParseMode:   messages.ParseModeHTML,
 		ReplyMarkup: keyboard,
 	})
+	if sent != nil {
+		bh.addPendingSelection(session, sent.ID, task.ID)
+		_ = bh.store.UpdateSession(session)
+	}
 }
 
 func (bh *Handlers) handleBatchFormatSelection(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session, lang i18n.Lang, batchTask *types.Task, targetExt string) {
@@ -1475,15 +1500,15 @@ func (bh *Handlers) HandleFile(ctx context.Context, b *bot.Bot, update *models.U
 		session.Options = map[string]interface{}{}
 	}
 
-	mediaGroupID := ""
-	if update != nil && update.Message != nil {
-		mediaGroupID = strings.TrimSpace(update.Message.MediaGroupID)
+	if st, ok := session.Options["mb_state"].(string); ok && strings.TrimSpace(st) == "collect" {
+		bh.manualBatchAddFiles(ctx, b, session, lang, filesInfo.Files)
+		return
 	}
-	collectKey := session.ID
-	if mediaGroupID != "" {
-		collectKey = session.ID + ":mg:" + mediaGroupID
+
+	for _, fi := range filesInfo.Files {
+		f := formats.BatchFile{FileID: fi.FileID, FileName: fi.FileName, FileSize: fi.FileSize}
+		bh.createAndAskFormatForSingleFile(ctx, b, session, lang, f)
 	}
-	bh.appendToUserBatch(ctx, b, collectKey, update.Message.Chat.ID, session, lang, filesInfo.Files)
 }
 
 func (bh *Handlers) appendToUserBatch(ctx context.Context, b *bot.Bot, collectKey string, chatID int64, session *types.Session, lang i18n.Lang, files []contextkeys.FileInfo) {
@@ -1568,6 +1593,9 @@ func (bh *Handlers) appendToUserBatch(ctx context.Context, b *bot.Bot, collectKe
 		}
 		_ = bh.store.CreateTask(task)
 		taskID = task.ID
+		bh.batchMu.Lock()
+		bh.batchTaskID[collectKey] = taskID
+		bh.batchMu.Unlock()
 		if collectKey == session.ID {
 			session.Options["collect_task_id"] = taskID
 			_ = bh.store.UpdateSession(session)
@@ -1597,13 +1625,21 @@ func (bh *Handlers) appendToUserBatch(ctx context.Context, b *bot.Bot, collectKe
 	task.Options["lang"] = string(lang)
 	_ = bh.store.UpdateTask(task)
 
-	bh.resetBatchTimer(b, collectKey, session.ID, task.ID)
+	bh.resetBatchTimer(b, collectKey, session.ID, task.ID, len(list))
 }
 
-func (bh *Handlers) resetBatchTimer(b *bot.Bot, collectKey string, sessionID string, collectorTaskID string) {
+func (bh *Handlers) resetBatchTimer(b *bot.Bot, collectKey string, sessionID string, collectorTaskID string, batchCount int) {
 	window := 900 * time.Millisecond
 	if strings.Contains(collectKey, ":mg:") {
-		window = 1500 * time.Millisecond
+		if batchCount <= 1 {
+			window = 3500 * time.Millisecond
+		} else {
+			window = 2000 * time.Millisecond
+		}
+	} else {
+		if batchCount <= 1 {
+			window = 3500 * time.Millisecond
+		}
 	}
 	bh.batchMu.Lock()
 	if t, ok := bh.batchTimers[collectKey]; ok && t != nil {
@@ -1810,6 +1846,31 @@ func (bh *Handlers) HandleText(ctx context.Context, b *bot.Bot, update *models.U
 		return
 	}
 
+	if session != nil && session.Options != nil {
+		if st, ok := session.Options["mb_state"].(string); ok && strings.TrimSpace(st) == "await_count" {
+			n, err := strconv.Atoi(strings.TrimSpace(text))
+			if err != nil || n <= 0 || n > 100 {
+				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+					ChatID:    chatID,
+					Text:      messages.BatchCountInvalid(lang),
+					ParseMode: messages.ParseModeHTML,
+				})
+				return
+			}
+			session.Options["mb_state"] = "collect"
+			session.Options["mb_expected"] = n
+			session.Options["mb_files"] = []interface{}{}
+			_ = bh.store.UpdateSession(session)
+			bh.startManualBatchTimer(b, session.ID)
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:    chatID,
+				Text:      messages.BatchCountAccepted(lang, n),
+				ParseMode: messages.ParseModeHTML,
+			})
+			return
+		}
+	}
+
 	tmpDir := filepath.Join(os.TempDir(), "bot_converter_text")
 	_ = os.MkdirAll(tmpDir, 0755)
 	tmpName := fmt.Sprintf("text_%d.txt", time.Now().Unix())
@@ -1913,6 +1974,200 @@ func (bh *Handlers) HandleText(ctx context.Context, b *bot.Bot, update *models.U
 	if sent != nil {
 		bh.addPendingSelection(session, sent.ID, task.ID)
 		_ = bh.store.UpdateSession(session)
+	}
+}
+
+func (bh *Handlers) startManualBatchTimer(b *bot.Bot, sessionID string) {
+	key := "mb:" + strings.TrimSpace(sessionID)
+	bh.batchMu.Lock()
+	if t, ok := bh.batchTimers[key]; ok && t != nil {
+		t.Stop()
+	}
+	bh.batchTimers[key] = time.AfterFunc(10*time.Second, func() {
+		bh.manualBatchFinalize(b, sessionID, true)
+	})
+	bh.batchMu.Unlock()
+}
+
+func (bh *Handlers) stopManualBatchTimer(sessionID string) {
+	key := "mb:" + strings.TrimSpace(sessionID)
+	bh.batchMu.Lock()
+	if t, ok := bh.batchTimers[key]; ok && t != nil {
+		t.Stop()
+	}
+	delete(bh.batchTimers, key)
+	bh.batchMu.Unlock()
+}
+
+func (bh *Handlers) manualBatchAddFiles(ctx context.Context, b *bot.Bot, session *types.Session, lang i18n.Lang, files []contextkeys.FileInfo) {
+	if session == nil || session.Options == nil || len(files) == 0 {
+		return
+	}
+	expected := 0
+	if v, ok := session.Options["mb_expected"]; ok {
+		switch t := v.(type) {
+		case int:
+			expected = t
+		case int64:
+			expected = int(t)
+		case float64:
+			expected = int(t)
+		}
+	}
+	list := []interface{}{}
+	if v, ok := session.Options["mb_files"]; ok {
+		if arr, ok := v.([]interface{}); ok {
+			list = arr
+		}
+	}
+	for _, fi := range files {
+		list = append(list, map[string]interface{}{
+			"file_id":   fi.FileID,
+			"file_name": fi.FileName,
+			"file_size": fi.FileSize,
+		})
+	}
+	session.Options["mb_files"] = list
+	_ = bh.store.UpdateSession(session)
+
+	if expected > 0 && len(list) >= expected {
+		bh.manualBatchFinalize(b, session.ID, false)
+	}
+}
+
+func (bh *Handlers) manualBatchFinalize(b *bot.Bot, sessionID string, timedOut bool) {
+	bh.stopManualBatchTimer(sessionID)
+	session, err := bh.store.GetSession(sessionID)
+	if err != nil || session == nil || session.Options == nil {
+		return
+	}
+	lang := langFromSessionOrCtx(context.Background(), session)
+	expected := 0
+	if v, ok := session.Options["mb_expected"]; ok {
+		switch t := v.(type) {
+		case int:
+			expected = t
+		case int64:
+			expected = int(t)
+		case float64:
+			expected = int(t)
+		}
+	}
+	files := parseBatchFiles(session.Options["mb_files"])
+
+	delete(session.Options, "mb_state")
+	delete(session.Options, "mb_expected")
+	delete(session.Options, "mb_files")
+	_ = bh.store.UpdateSession(session)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if timedOut && expected > 0 {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    session.ChatID,
+			Text:      messages.BatchTimeout(lang, len(files), expected),
+			ParseMode: messages.ParseModeHTML,
+		})
+	}
+
+	if len(files) == 0 {
+		return
+	}
+
+	type g struct {
+		ext   string
+		files []formats.BatchFile
+	}
+	byExt := map[string][]formats.BatchFile{}
+	order := make([]string, 0)
+	for _, f := range files {
+		ext := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(bh.getExtensionFromFileName(f.FileName)), "."))
+		if ext == "" {
+			ext = "_unknown_"
+		}
+		if _, ok := byExt[ext]; !ok {
+			order = append(order, ext)
+		}
+		byExt[ext] = append(byExt[ext], f)
+	}
+
+	unlimited := false
+	remaining := 0
+	if bh.billing != nil {
+		u, err := bh.billing.IsUnlimited(session.UserID)
+		if err == nil {
+			unlimited = u
+		}
+		if !unlimited {
+			r, err := bh.billing.GetOrResetBalance(session.UserID)
+			if err == nil {
+				remaining = r
+			}
+		}
+	}
+
+	for _, extKey := range order {
+		groupFiles := byExt[extKey]
+		if len(groupFiles) > 1 && extKey != "_unknown_" {
+			targets := formats.GetTargetFormatsForSourceExt(extKey)
+			if len(targets) > 0 {
+				bt := &types.Task{
+					SessionID:   session.ID,
+					State:       types.StateChooseExt,
+					FileID:      groupFiles[0].FileID,
+					FileName:    fmt.Sprintf("%d files.%s", len(groupFiles), extKey),
+					OriginalExt: extKey,
+					TargetExt:   "",
+					Options: map[string]interface{}{
+						"lang":       string(lang),
+						"batch_mode": "",
+					},
+				}
+				batchFiles := make([]map[string]interface{}, 0, len(groupFiles))
+				for _, gf := range groupFiles {
+					batchFiles = append(batchFiles, map[string]interface{}{
+						"file_id":   gf.FileID,
+						"file_name": gf.FileName,
+						"file_size": gf.FileSize,
+					})
+				}
+				bt.Options["batch_files"] = batchFiles
+				_ = bh.store.CreateTask(bt)
+
+				rows := [][]models.InlineKeyboardButton{
+					{
+						{Text: " " + messages.BatchBtnAll(lang) + " ", CallbackData: "batch_all_for_" + bt.ID},
+					},
+					{
+						{Text: " " + messages.BatchBtnSeparate(lang) + " ", CallbackData: "batch_sep_for_" + bt.ID},
+					},
+				}
+				text := messages.BatchReceivedChoice(lang, extKey, len(groupFiles))
+				if bh.billing != nil {
+					if unlimited {
+						text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
+					} else {
+						text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
+						if remaining <= 0 {
+							text = text + "\n" + messages.NoCreditsHint(lang)
+						}
+					}
+				}
+				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+					ChatID:    session.ChatID,
+					Text:      text,
+					ParseMode: messages.ParseModeHTML,
+					ReplyMarkup: &models.InlineKeyboardMarkup{
+						InlineKeyboard: rows,
+					},
+				})
+				continue
+			}
+		}
+		for _, f := range groupFiles {
+			bh.createAndAskFormatForSingleFile(ctx, b, session, lang, f)
+		}
 	}
 }
 
