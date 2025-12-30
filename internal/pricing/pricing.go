@@ -66,12 +66,6 @@ func Credits(originalExt, targetExt string, fileSize int64) (credits int, heavy 
 	if orig == "pdf" && targ == "txt" {
 		return 1, false
 	}
-	if orig == "pdf" && targ == "zip" {
-		if fileSize >= 50*1024*1024 {
-			return 12, true
-		}
-		return 7, true
-	}
 
 	if isVideo(orig) {
 		if targ == "gif" {

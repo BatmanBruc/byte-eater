@@ -496,19 +496,6 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 		targetExt = strings.ToLower(strings.TrimSpace(p[1]))
 		videoGIFHeight, _ = strconv.Atoi(strings.TrimSpace(p[2]))
 	}
-	pdfZipFmt := ""
-	if len(p) == 2 && p[0] == "pdfzip" {
-		action = "pdf_zip"
-		targetExt = "zip"
-		pdfZipFmt = strings.ToLower(strings.TrimSpace(p[1]))
-		if pdfZipFmt != "png" && pdfZipFmt != "jpg" && pdfZipFmt != "jpeg" {
-			_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackInvalidButtonData(lang))
-			return
-		}
-		if pdfZipFmt == "jpeg" {
-			pdfZipFmt = "jpg"
-		}
-	}
 	profile := ""
 	if len(p) >= 2 && p[0] == "pimg" {
 		profile = strings.Join(p[1:], "_")
@@ -665,7 +652,6 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 	delete(task.Options, "vid_gif_height")
 	delete(task.Options, "vid_w")
 	delete(task.Options, "vid_h")
-	delete(task.Options, "pdf_zip_fmt")
 	if action != "" {
 		if action == "compress" || action == "resize" {
 			task.Options["img_op"] = action
@@ -716,9 +702,6 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 				task.Options["vid_w"] = vidW
 				task.Options["vid_h"] = vidH
 			}
-		}
-		if action == "pdf_zip" {
-			task.Options["pdf_zip_fmt"] = pdfZipFmt
 		}
 	}
 	if !unlimited && bh.billing != nil {
@@ -1241,6 +1224,10 @@ func (bh *Handlers) handleBatchChoice(ctx context.Context, b *bot.Bot, update *m
 	}
 
 	if choice == "batch_sep" {
+		if update != nil && update.CallbackQuery != nil && update.CallbackQuery.Message.Message != nil {
+			msg := update.CallbackQuery.Message.Message
+			_, _ = b.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: msg.Chat.ID, MessageID: msg.ID})
+		}
 		_ = bh.store.DeleteTask(task.ID)
 		for _, f := range files {
 			bh.createAndAskFormatForSingleFile(ctx, b, session, lang, f)
@@ -1274,18 +1261,18 @@ func (bh *Handlers) handleBatchChoice(ctx context.Context, b *bot.Bot, update *m
 			}
 		}
 
-		if update.CallbackQuery.Message.Message != nil {
+		if update != nil && update.CallbackQuery != nil && update.CallbackQuery.Message.Message != nil {
 			msg := update.CallbackQuery.Message.Message
-			_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
-				ChatID:    msg.Chat.ID,
-				MessageID: msg.ID,
-				Text:      text,
-				ParseMode: messages.ParseModeHTML,
-				ReplyMarkup: &models.InlineKeyboardMarkup{
-					InlineKeyboard: keyboard.InlineKeyboard,
-				},
-			})
+			_, _ = b.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: msg.Chat.ID, MessageID: msg.ID})
 		}
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    session.ChatID,
+			Text:      text,
+			ParseMode: messages.ParseModeHTML,
+			ReplyMarkup: &models.InlineKeyboardMarkup{
+				InlineKeyboard: keyboard.InlineKeyboard,
+			},
+		})
 		_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, "")
 		return
 	}
@@ -1446,32 +1433,29 @@ func (bh *Handlers) handleBatchFormatSelection(ctx context.Context, b *bot.Bot, 
 
 	_ = bh.store.DeleteTask(batchTask.ID)
 
-	if update.CallbackQuery.Message.Message != nil {
+	if update != nil && update.CallbackQuery != nil && update.CallbackQuery.Message.Message != nil {
 		msg := update.CallbackQuery.Message.Message
-		text := messages.BatchStarted(lang, len(files))
-		if totalCredits > 0 {
-			text = text + "\n\n" + messages.TaskTypeLine(lang, heavyAny) + "\n" + messages.CreditsCostLine(lang, totalCredits)
-		}
-		if bh.billing != nil {
-			if unlimited {
-				text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
-			} else {
-				text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
-				if remaining <= 0 {
-					text = text + "\n" + messages.NoCreditsHint(lang)
-				}
+		_, _ = b.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: msg.Chat.ID, MessageID: msg.ID})
+	}
+	text := messages.BatchStarted(lang, len(files))
+	if totalCredits > 0 {
+		text = text + "\n\n" + messages.TaskTypeLine(lang, heavyAny) + "\n" + messages.CreditsCostLine(lang, totalCredits)
+	}
+	if bh.billing != nil {
+		if unlimited {
+			text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
+		} else {
+			text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
+			if remaining <= 0 {
+				text = text + "\n" + messages.NoCreditsHint(lang)
 			}
 		}
-		_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
-			ChatID:    msg.Chat.ID,
-			MessageID: msg.ID,
-			Text:      text,
-			ParseMode: messages.ParseModeHTML,
-			ReplyMarkup: &models.InlineKeyboardMarkup{
-				InlineKeyboard: [][]models.InlineKeyboardButton{},
-			},
-		})
 	}
+	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:    session.ChatID,
+		Text:      text,
+		ParseMode: messages.ParseModeHTML,
+	})
 	_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, "")
 }
 
@@ -1491,10 +1475,18 @@ func (bh *Handlers) HandleFile(ctx context.Context, b *bot.Bot, update *models.U
 		session.Options = map[string]interface{}{}
 	}
 
-	bh.appendToUserBatch(ctx, b, update.Message.Chat.ID, session, lang, filesInfo.Files)
+	mediaGroupID := ""
+	if update != nil && update.Message != nil {
+		mediaGroupID = strings.TrimSpace(update.Message.MediaGroupID)
+	}
+	collectKey := session.ID
+	if mediaGroupID != "" {
+		collectKey = session.ID + ":mg:" + mediaGroupID
+	}
+	bh.appendToUserBatch(ctx, b, collectKey, update.Message.Chat.ID, session, lang, filesInfo.Files)
 }
 
-func (bh *Handlers) appendToUserBatch(ctx context.Context, b *bot.Bot, chatID int64, session *types.Session, lang i18n.Lang, files []contextkeys.FileInfo) {
+func (bh *Handlers) appendToUserBatch(ctx context.Context, b *bot.Bot, collectKey string, chatID int64, session *types.Session, lang i18n.Lang, files []contextkeys.FileInfo) {
 	if session == nil || len(files) == 0 {
 		return
 	}
@@ -1502,10 +1494,22 @@ func (bh *Handlers) appendToUserBatch(ctx context.Context, b *bot.Bot, chatID in
 		session.Options = map[string]interface{}{}
 	}
 
+	collectKey = strings.TrimSpace(collectKey)
+	if collectKey == "" {
+		collectKey = session.ID
+	}
+
 	taskID := ""
-	if v, ok := session.Options["collect_task_id"]; ok {
-		if s, ok := v.(string); ok {
-			taskID = strings.TrimSpace(s)
+	bh.batchMu.Lock()
+	if v, ok := bh.batchTaskID[collectKey]; ok {
+		taskID = strings.TrimSpace(v)
+	}
+	bh.batchMu.Unlock()
+	if taskID == "" && collectKey == session.ID {
+		if v, ok := session.Options["collect_task_id"]; ok {
+			if s, ok := v.(string); ok {
+				taskID = strings.TrimSpace(s)
+			}
 		}
 	}
 
@@ -1527,12 +1531,19 @@ func (bh *Handlers) appendToUserBatch(ctx context.Context, b *bot.Bot, chatID in
 				if t == nil || t.Options == nil {
 					continue
 				}
+				if v, ok := t.Options["collect_key"]; ok {
+					if s, ok := v.(string); ok && strings.TrimSpace(s) != "" && strings.TrimSpace(s) != collectKey {
+						continue
+					}
+				}
 				if v, ok := t.Options["collecting"]; ok {
 					if bv, ok := v.(bool); ok && bv && t.State == types.StateChooseExt {
 						task = t
 						taskID = t.ID
-						session.Options["collect_task_id"] = taskID
-						_ = bh.store.UpdateSession(session)
+						if collectKey == session.ID {
+							session.Options["collect_task_id"] = taskID
+							_ = bh.store.UpdateSession(session)
+						}
 						break
 					}
 				}
@@ -1549,16 +1560,18 @@ func (bh *Handlers) appendToUserBatch(ctx context.Context, b *bot.Bot, chatID in
 			OriginalExt: "",
 			TargetExt:   "",
 			Options: map[string]interface{}{
-				"lang":           string(lang),
-				"collecting":     true,
-				"collect_worker": false,
-				"batch_files":    []interface{}{},
+				"lang":        string(lang),
+				"collecting":  true,
+				"collect_key": collectKey,
+				"batch_files": []interface{}{},
 			},
 		}
 		_ = bh.store.CreateTask(task)
 		taskID = task.ID
-		session.Options["collect_task_id"] = taskID
-		_ = bh.store.UpdateSession(session)
+		if collectKey == session.ID {
+			session.Options["collect_task_id"] = taskID
+			_ = bh.store.UpdateSession(session)
+		}
 	}
 
 	list := []interface{}{}
@@ -1584,29 +1597,32 @@ func (bh *Handlers) appendToUserBatch(ctx context.Context, b *bot.Bot, chatID in
 	task.Options["lang"] = string(lang)
 	_ = bh.store.UpdateTask(task)
 
-	bh.resetBatchTimer(b, session.ID, task.ID)
+	bh.resetBatchTimer(b, collectKey, session.ID, task.ID)
 }
 
-func (bh *Handlers) resetBatchTimer(b *bot.Bot, sessionID string, collectorTaskID string) {
+func (bh *Handlers) resetBatchTimer(b *bot.Bot, collectKey string, sessionID string, collectorTaskID string) {
 	window := 900 * time.Millisecond
+	if strings.Contains(collectKey, ":mg:") {
+		window = 1500 * time.Millisecond
+	}
 	bh.batchMu.Lock()
-	if t, ok := bh.batchTimers[sessionID]; ok && t != nil {
+	if t, ok := bh.batchTimers[collectKey]; ok && t != nil {
 		t.Stop()
 	}
-	bh.batchTaskID[sessionID] = collectorTaskID
-	bh.batchTimers[sessionID] = time.AfterFunc(window, func() {
+	bh.batchTaskID[collectKey] = collectorTaskID
+	bh.batchTimers[collectKey] = time.AfterFunc(window, func() {
 		bh.batchMu.Lock()
-		current := bh.batchTaskID[sessionID]
+		current := bh.batchTaskID[collectKey]
 		bh.batchMu.Unlock()
 		if strings.TrimSpace(current) != strings.TrimSpace(collectorTaskID) {
 			return
 		}
-		bh.finalizeUserBatch(b, sessionID, collectorTaskID)
+		bh.finalizeUserBatch(b, collectKey, sessionID, collectorTaskID)
 	})
 	bh.batchMu.Unlock()
 }
 
-func (bh *Handlers) finalizeUserBatch(b *bot.Bot, sessionID string, collectorTaskID string) {
+func (bh *Handlers) finalizeUserBatch(b *bot.Bot, collectKey string, sessionID string, collectorTaskID string) {
 	task, err := bh.store.GetTask(collectorTaskID)
 	if err != nil || task == nil || task.Options == nil {
 		return
@@ -1653,16 +1669,18 @@ func (bh *Handlers) finalizeUserBatch(b *bot.Bot, sessionID string, collectorTas
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	delete(session.Options, "collect_task_id")
-	_ = bh.store.UpdateSession(session)
+	if collectKey == session.ID {
+		delete(session.Options, "collect_task_id")
+		_ = bh.store.UpdateSession(session)
+	}
 	_ = bh.store.DeleteTask(task.ID)
 
 	bh.batchMu.Lock()
-	if t, ok := bh.batchTimers[sessionID]; ok && t != nil {
+	if t, ok := bh.batchTimers[collectKey]; ok && t != nil {
 		t.Stop()
 	}
-	delete(bh.batchTimers, sessionID)
-	delete(bh.batchTaskID, sessionID)
+	delete(bh.batchTimers, collectKey)
+	delete(bh.batchTaskID, collectKey)
 	bh.batchMu.Unlock()
 
 	unlimited := false

@@ -390,21 +390,6 @@ func getPdfActionButtonsWithCredits(taskID string, fileSize int64, lang i18n.Lan
 			Heavy:        heavy,
 		})
 	}
-	{
-		credits, heavy := pricing.Credits("pdf", "zip", fileSize)
-		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(pick(lang, "🖼 PNG (ZIP)", "🖼 PNG (ZIP)"), credits, heavy),
-			CallbackData: "pdfzip_png_for_" + taskID,
-			Credits:      credits,
-			Heavy:        heavy,
-		})
-		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(pick(lang, "🖼 JPG (ZIP)", "🖼 JPG (ZIP)"), credits, heavy),
-			CallbackData: "pdfzip_jpg_for_" + taskID,
-			Credits:      credits,
-			Heavy:        heavy,
-		})
-	}
 	return buttons
 }
 
@@ -487,7 +472,7 @@ var SupportedFormats = map[string][]FormatCategory{
 		{
 			Name:    "Document",
 			Icon:    "💼",
-			Formats: []string{"XLSX", "XLS", "TXT", "RTF", "DOC", "DOCX", "ODT", "PDF", "ODS", "ZIP", "TORRENT"},
+			Formats: []string{"XLSX", "XLS", "TXT", "RTF", "DOC", "DOCX", "ODT", "PDF", "ODS", "TORRENT"},
 		},
 	},
 	"presentation": {

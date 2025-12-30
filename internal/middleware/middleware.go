@@ -421,7 +421,6 @@ func (ma *Middlewares) getExtensionFromMimeType(mimeType string, defaultExt stri
 		"jp2":     "jp2",
 		"tgs":     "tgs",
 		"pdf":     "pdf",
-		"zip":     "zip",
 		"mp4":     "mp4",
 		"mp3":     "mp3",
 		"ogg":     "ogg",
