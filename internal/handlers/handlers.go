@@ -1861,7 +1861,6 @@ func (bh *Handlers) HandleText(ctx context.Context, b *bot.Bot, update *models.U
 			session.Options["mb_expected"] = n
 			session.Options["mb_files"] = []interface{}{}
 			_ = bh.store.UpdateSession(session)
-			bh.startManualBatchTimer(b, session.ID)
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID:    chatID,
 				Text:      messages.BatchCountAccepted(lang, n),
@@ -2032,6 +2031,8 @@ func (bh *Handlers) manualBatchAddFiles(ctx context.Context, b *bot.Bot, session
 			list = arr
 		}
 	}
+	filesBefore := len(list)
+
 	for _, fi := range files {
 		list = append(list, map[string]interface{}{
 			"file_id":   fi.FileID,
@@ -2045,7 +2046,9 @@ func (bh *Handlers) manualBatchAddFiles(ctx context.Context, b *bot.Bot, session
 	if expected > 0 && len(list) >= expected {
 		bh.stopManualBatchTimer(session.ID)
 		bh.manualBatchFinalize(b, session.ID, false)
-	} else if len(list) > 0 {
+	} else if filesBefore == 0 && len(list) > 0 {
+		bh.startManualBatchTimer(b, session.ID)
+	} else if len(list) > filesBefore {
 		bh.resetManualBatchTimer(b, session.ID)
 	}
 }
