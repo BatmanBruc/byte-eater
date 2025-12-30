@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice \
     calibre \
     poppler-utils \
+    pdftk \
     fonts-liberation \
     fonts-dejavu-core \
     fonts-noto \

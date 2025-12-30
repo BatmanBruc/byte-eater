@@ -227,14 +227,8 @@ func GetButtonsForSourceExtWithCredits(sourceExt string, taskID string, fileSize
 }
 
 func formatButtonText(label string, credits int, heavy bool) string {
-	label = strings.TrimSpace(label)
-	if credits <= 0 {
-		return label
-	}
-	if heavy {
-		return label + " " + "★" + " " + fmt.Sprintf("(%d)", credits)
-	}
-	return label + " " + fmt.Sprintf("(%d)", credits)
+	// Все операции стоят 1 кредит, не показываем стоимость
+	return strings.TrimSpace(label)
 }
 
 func getImageActionButtonsWithCredits(sourceExt string, taskID string, fileSize int64, lang i18n.Lang) []FormatButton {

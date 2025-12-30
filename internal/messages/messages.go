@@ -170,9 +170,9 @@ func PlanUnlimitedLine(lang i18n.Lang) string {
 
 func CreditsRemainingLine(lang i18n.Lang, remaining int) string {
 	if lang == i18n.RU {
-		return fmt.Sprintf("Осталось кредитов: %d/50", remaining)
+		return fmt.Sprintf("Осталось кредитов: %d/20", remaining)
 	}
-	return fmt.Sprintf("Remaining credits: %d/50", remaining)
+	return fmt.Sprintf("Remaining credits: %d/20", remaining)
 }
 
 func NoCreditsHint(lang i18n.Lang) string {
@@ -188,6 +188,14 @@ func BalanceUnavailable(lang i18n.Lang) string {
 
 func CallbackInvalidButtonData(lang i18n.Lang) string {
 	return pick(lang, "Некорректные данные кнопки", "Invalid button data")
+}
+
+func CallbackInvalidAction(lang i18n.Lang) string {
+	return pick(lang, "🚫 Действие невозможно", "🚫 Action not possible")
+}
+
+func ErrorUnsupportedFormat(lang i18n.Lang) string {
+	return pick(lang, "🚫 <b>Неподдерживаемый формат файла</b>\nОтправьте файл в поддерживаемом формате.", "🚫 <b>Unsupported file format</b>\nPlease send a file in supported format.")
 }
 
 func CallbackUnsupportedFormat(lang i18n.Lang) string {
@@ -215,12 +223,12 @@ func CallbackInsufficientCredits(lang i18n.Lang, remaining int) string {
 		if remaining <= 0 {
 			return "Недостаточно кредитов. Осталось 0/50.\n\n" + NoCreditsHint(lang)
 		}
-		return fmt.Sprintf("Недостаточно кредитов. Осталось %d/50", remaining)
+		return fmt.Sprintf("Недостаточно кредитов. Осталось %d/20", remaining)
 	}
 	if remaining <= 0 {
-		return "Not enough credits. Remaining 0/50.\n\n" + NoCreditsHint(lang)
+		return "Not enough credits. Remaining 0/20.\n\n" + NoCreditsHint(lang)
 	}
-	return fmt.Sprintf("Not enough credits. Remaining %d/50", remaining)
+	return fmt.Sprintf("Not enough credits. Remaining %d/20", remaining)
 }
 
 func AdminGrantUsage(lang i18n.Lang) string {
@@ -308,6 +316,41 @@ func MenuBtnBatch(lang i18n.Lang) string {
 	return pick(lang, "📦 Конвертировать несколько файлов", "📦 Convert multiple files")
 }
 
+func MenuBtnMergePDF(lang i18n.Lang) string {
+	return pick(lang, "📑 Объединить PDF", "📑 Merge PDF")
+}
+
+func MergePDFWaiting(lang i18n.Lang) string {
+	return pick(lang,
+		"📑 <b>Объединение PDF</b>\n\nОжидаю файлы. Отправляйте PDF файлы по одному.\n\n<i>Telegram не гарантирует последовательность, если вы пришлёте пачкой.</i>",
+		"📑 <b>Merge PDF</b>\n\nWaiting for files. Send PDF files one by one.\n\n<i>Telegram doesn't guarantee order if you send multiple at once.</i>",
+	)
+}
+
+func MergePDFFilesList(lang i18n.Lang, files []string) string {
+	fileList := strings.Join(files, "\n• ")
+	return pick(lang,
+		fmt.Sprintf("📑 <b>Файлы для объединения:</b>\n• %s\n\nНажмите кнопку для объединения файлов в один PDF.", fileList),
+		fmt.Sprintf("📑 <b>Files to merge:</b>\n• %s\n\nClick the button to merge files into one PDF.", fileList),
+	)
+}
+
+func MergePDFBtn(lang i18n.Lang) string {
+	return pick(lang, "🔗 Объединить", "🔗 Merge")
+}
+
+func MergePDFStarted(lang i18n.Lang) string {
+	return pick(lang, "🔄 Объединяю PDF файлы...", "🔄 Merging PDF files...")
+}
+
+func MergePDFSuccess(lang i18n.Lang) string {
+	return pick(lang, "✅ PDF файлы успешно объединены!", "✅ PDF files merged successfully!")
+}
+
+func MergePDFError(lang i18n.Lang) string {
+	return pick(lang, "❌ Ошибка объединения PDF файлов", "❌ Error merging PDF files")
+}
+
 func MenuBtnBack(lang i18n.Lang) string {
 	return pick(lang, "⬅️ Назад", "⬅️ Back")
 }
@@ -322,23 +365,23 @@ func MenuBtnSubscribeNow(lang i18n.Lang, active bool) string {
 func AboutCreditsBlock(lang i18n.Lang) string {
 	return pick(lang,
 		"💳 <b>Кредиты</b>\n- Без подписки: 50 кредитов в сутки (обновляются каждый день)\n- Подписка: кредиты не нужны (безлимит)\n\nКоманды: <code>/balance</code>, <code>/menu</code>",
-		"💳 <b>Credits</b>\n- No subscription: 50 credits per day (refreshed daily)\n- Subscription: credits are not needed (unlimited)\n\nCommands: <code>/balance</code>, <code>/menu</code>",
+		"💳 <b>Credits</b>\n- No subscription: 20 credits per day (refreshed daily)\n- Subscription: credits are not needed (unlimited)\n\nCommands: <code>/balance</code>, <code>/menu</code>",
 	)
 }
 
 func BatchHowManyPrompt(lang i18n.Lang) string {
 	return pick(
 		lang,
-		"📦 <b>Конвертация нескольких файлов</b>\n\nСколько файлов Вы отправите?\n<b>Важно:</b> укажите точное число, иначе часть файлов может не попасть.\n\nПосле этого отправьте файлы (желательно одним сообщением/альбомом).\nТаймер: <b>10 секунд</b>.",
-		"📦 <b>Batch conversion</b>\n\nHow many files will you send?\n<b>Important:</b> enter the exact number, otherwise some files may be missed.\n\nThen send the files (preferably as one message/album).\nTimeout: <b>10 seconds</b>.",
+		"📦 <b>Конвертация нескольких файлов</b>\n\nСколько файлов Вы отправите?\n<b>Важно:</b> укажите точное число, иначе часть файлов может не попасть.\n\nПосле этого отправьте файлы (желательно одним сообщением/альбомом).",
+		"📦 <b>Batch conversion</b>\n\nHow many files will you send?\n<b>Important:</b> enter the exact number, otherwise some files may be missed.\n\nThen send the files (preferably as one message/album).",
 	)
 }
 
 func BatchCountAccepted(lang i18n.Lang, n int) string {
 	if lang == i18n.RU {
-		return fmt.Sprintf("✅ Ок. Жду <b>%d</b> файлов.\nОтправьте их сейчас. Таймер: <b>10 секунд</b>.", n)
+		return fmt.Sprintf("✅ Ок. Жду <b>%d</b> файлов.\nОтправьте их сейчас.", n)
 	}
-	return fmt.Sprintf("✅ OK. Waiting for <b>%d</b> files.\nSend them now. Timeout: <b>10 seconds</b>.", n)
+	return fmt.Sprintf("✅ OK. Waiting for <b>%d</b> files.\nSend them now.", n)
 }
 
 func BatchCountInvalid(lang i18n.Lang) string {

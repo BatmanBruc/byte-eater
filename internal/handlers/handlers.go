@@ -3,8 +3,11 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -221,6 +224,9 @@ func (bh *Handlers) buildMenuKeyboard(lang i18n.Lang, withBack bool) models.Inli
 		{Text: pad(messages.MenuBtnBatch(lang)), CallbackData: "menu_batch"},
 	})
 	rows = append(rows, []models.InlineKeyboardButton{
+		{Text: pad(messages.MenuBtnMergePDF(lang)), CallbackData: "menu_merge_pdf"},
+	})
+	rows = append(rows, []models.InlineKeyboardButton{
 		{Text: pad(messages.MenuBtnSubscription(lang)), CallbackData: "menu_sub"},
 	})
 	rows = append(rows, []models.InlineKeyboardButton{
@@ -284,6 +290,22 @@ func (bh *Handlers) HandleMenuClick(ctx context.Context, b *bot.Bot, update *mod
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    session.ChatID,
 			Text:      messages.BatchHowManyPrompt(lang),
+			ParseMode: messages.ParseModeHTML,
+		})
+		return
+	case "menu_merge_pdf":
+		if session.Options == nil {
+			session.Options = map[string]interface{}{}
+		}
+		delete(session.Options, "merge_state")
+		delete(session.Options, "merge_files")
+		delete(session.Options, "merge_msg_id")
+		session.Options["merge_state"] = "waiting"
+		_ = bh.store.UpdateSession(session)
+		_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, "")
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    session.ChatID,
+			Text:      messages.MergePDFWaiting(lang),
 			ParseMode: messages.ParseModeHTML,
 		})
 		return
@@ -466,6 +488,11 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 	data, _ := contextkeys.GetCallbackData(ctx)
 	if data == "" {
 		data = update.CallbackQuery.Data
+	}
+
+	if data == "merge_pdf" {
+		bh.handleMergePDF(ctx, b, update, session, lang)
+		return
 	}
 
 	format, taskID, err := bh.parseClickButtonData(data)
@@ -749,9 +776,7 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 		statusText = statusText + "\n\n" + messages.TaskTypeLine(lang, heavy) + "\n" + messages.CreditsCostLine(lang, credits)
 	}
 	if bh.billing != nil {
-		if unlimited {
-			statusText = statusText + "\n\n" + messages.PlanUnlimitedLine(lang)
-		} else {
+		if !unlimited {
 			statusText = statusText + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
 		}
 	}
@@ -873,9 +898,7 @@ func (bh *Handlers) refreshSelectionMessage(ctx context.Context, b *bot.Bot, cha
 		text = messages.FileReceivedChooseFormat(lang, task.FileName)
 	}
 	if bh.billing != nil {
-		if unlimited {
-			text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
-		} else {
+		if !unlimited {
 			text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
 			if remaining <= 0 {
 				text = text + "\n" + messages.NoCreditsHint(lang)
@@ -954,9 +977,7 @@ func (bh *Handlers) refreshPendingSelections(ctx context.Context, b *bot.Bot, se
 			text = messages.FileReceivedChooseFormat(lang, task.FileName)
 		}
 		if bh.billing != nil {
-			if unlimited {
-				text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
-			} else {
+			if !unlimited {
 				text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
 				if remaining <= 0 {
 					text = text + "\n" + messages.NoCreditsHint(lang)
@@ -1148,15 +1169,15 @@ func (bh *Handlers) HandleCommand(ctx context.Context, b *bot.Bot, update *model
 			text = messages.BalanceUnavailable(lang)
 		} else {
 			unlimited, _ := bh.billing.IsUnlimited(session.UserID)
-			if unlimited {
-				text = messages.PlanUnlimitedLine(lang)
-			} else {
+			if !unlimited {
 				rem, err := bh.billing.GetOrResetBalance(session.UserID)
 				if err != nil {
 					text = messages.BalanceUnavailable(lang)
 				} else {
 					text = messages.CreditsRemainingLine(lang, rem)
 				}
+			} else {
+				text = "" // Для подписчиков не показывать ничего
 			}
 		}
 		b.SendMessage(ctx, &bot.SendMessageParams{
@@ -1225,6 +1246,118 @@ func adminSecretOK(secret string) bool {
 		return false
 	}
 	return secret == expected
+}
+
+func (bh *Handlers) handleMergePDFFile(ctx context.Context, b *bot.Bot, session *types.Session, lang i18n.Lang, files []contextkeys.FileInfo) {
+	if session == nil || session.Options == nil || len(files) == 0 {
+		return
+	}
+
+	// Проверить что файл - PDF
+	for _, fi := range files {
+		ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(fi.FileName), "."))
+		if ext != "pdf" {
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:    session.ChatID,
+				Text:      messages.ErrorUnsupportedFormat(lang),
+				ParseMode: messages.ParseModeHTML,
+			})
+			return
+		}
+	}
+
+	// Добавить файлы в список
+	list := []interface{}{}
+	if v, ok := session.Options["merge_files"]; ok {
+		if arr, ok := v.([]interface{}); ok {
+			list = arr
+		}
+	}
+
+	for _, fi := range files {
+		list = append(list, map[string]interface{}{
+			"file_id":   fi.FileID,
+			"file_name": fi.FileName,
+			"file_size": fi.FileSize,
+		})
+	}
+	session.Options["merge_files"] = list
+	_ = bh.store.UpdateSession(session)
+
+	// Удалить предыдущее сообщение если есть
+	if msgID, ok := session.Options["merge_msg_id"]; ok {
+		if id, ok := msgID.(int); ok {
+			_, _ = b.DeleteMessage(ctx, &bot.DeleteMessageParams{
+				ChatID:    session.ChatID,
+				MessageID: id,
+			})
+		}
+	}
+
+	// Получить список имен файлов
+	fileNames := []string{}
+	for _, item := range list {
+		if m, ok := item.(map[string]interface{}); ok {
+			if name, ok := m["file_name"].(string); ok {
+				fileNames = append(fileNames, name)
+			}
+		}
+	}
+
+	// Отправить новое сообщение со списком и кнопкой
+	sent, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:    session.ChatID,
+		Text:      messages.MergePDFFilesList(lang, fileNames),
+		ParseMode: messages.ParseModeHTML,
+		ReplyMarkup: &models.InlineKeyboardMarkup{
+			InlineKeyboard: [][]models.InlineKeyboardButton{
+				{
+					{Text: messages.MergePDFBtn(lang), CallbackData: "merge_pdf"},
+				},
+			},
+		},
+	})
+
+	if err == nil && sent != nil {
+		session.Options["merge_msg_id"] = sent.ID
+		_ = bh.store.UpdateSession(session)
+	}
+}
+
+func (bh *Handlers) handleMergePDF(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session, lang i18n.Lang) {
+	if session.Options == nil {
+		_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackTaskNotFound(lang))
+		return
+	}
+
+	files := []string{}
+	if v, ok := session.Options["merge_files"]; ok {
+		if arr, ok := v.([]interface{}); ok {
+			for _, item := range arr {
+				if m, ok := item.(map[string]interface{}); ok {
+					if name, ok := m["file_name"].(string); ok {
+						files = append(files, name)
+					}
+				}
+			}
+		}
+	}
+
+	if len(files) < 2 {
+		_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackInvalidAction(lang))
+		return
+	}
+
+	_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, "")
+
+	// Очистить состояние
+	delete(session.Options, "merge_state")
+	delete(session.Options, "merge_files")
+	delete(session.Options, "merge_msg_id")
+	_ = bh.store.UpdateSession(session)
+
+	// Запустить объединение
+	go bh.processMergePDF(b, session, lang, files)
 }
 
 func (bh *Handlers) handleBatchChoice(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session, lang i18n.Lang, batchTaskID string, choice string) {
@@ -1467,9 +1600,7 @@ func (bh *Handlers) handleBatchFormatSelection(ctx context.Context, b *bot.Bot, 
 		text = text + "\n\n" + messages.TaskTypeLine(lang, heavyAny) + "\n" + messages.CreditsCostLine(lang, totalCredits)
 	}
 	if bh.billing != nil {
-		if unlimited {
-			text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
-		} else {
+		if !unlimited {
 			text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
 			if remaining <= 0 {
 				text = text + "\n" + messages.NoCreditsHint(lang)
@@ -1498,6 +1629,11 @@ func (bh *Handlers) HandleFile(ctx context.Context, b *bot.Bot, update *models.U
 
 	if session.Options == nil {
 		session.Options = map[string]interface{}{}
+	}
+
+	if st, ok := session.Options["merge_state"].(string); ok && strings.TrimSpace(st) == "waiting" {
+		bh.handleMergePDFFile(ctx, b, session, lang, filesInfo.Files)
+		return
 	}
 
 	if st, ok := session.Options["mb_state"].(string); ok && strings.TrimSpace(st) == "collect" {
@@ -1772,9 +1908,7 @@ func (bh *Handlers) finalizeUserBatch(b *bot.Bot, collectKey string, sessionID s
 				}
 				text := messages.BatchReceivedChoice(lang, extKey, len(groupFiles))
 				if bh.billing != nil {
-					if unlimited {
-						text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
-					} else {
+					if !unlimited {
 						text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
 						if remaining <= 0 {
 							text = text + "\n" + messages.NoCreditsHint(lang)
@@ -2163,9 +2297,7 @@ func (bh *Handlers) manualBatchFinalize(b *bot.Bot, sessionID string, timedOut b
 				}
 				text := messages.BatchReceivedChoice(lang, extKey, len(groupFiles))
 				if bh.billing != nil {
-					if unlimited {
-						text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
-					} else {
+					if !unlimited {
 						text = text + "\n\n" + messages.CreditsRemainingLine(lang, remaining)
 						if remaining <= 0 {
 							text = text + "\n" + messages.NoCreditsHint(lang)
@@ -2208,4 +2340,137 @@ func (bh *Handlers) addPendingSelection(session *types.Session, messageID int, t
 		next = next[len(next)-25:]
 	}
 	session.Pending = next
+}
+
+func (bh *Handlers) downloadFile(ctx context.Context, b *bot.Bot, fileID, tempDir, fileName string) (string, error) {
+	fileInfo, err := b.GetFile(ctx, &bot.GetFileParams{
+		FileID: fileID,
+	})
+	if err != nil {
+		return "", fmt.Errorf("error getting file info: %v", err)
+	}
+
+	fileURL := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", b.Token(), fileInfo.FilePath)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", fileURL, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("bad status: %d", resp.StatusCode)
+	}
+
+	destPath := filepath.Join(tempDir, fmt.Sprintf("%s_%d_%s", fileID, time.Now().UnixNano(), fileName))
+	out, err := os.Create(destPath)
+	if err != nil {
+		return "", err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		os.Remove(destPath)
+		return "", err
+	}
+
+	return destPath, nil
+}
+
+func (bh *Handlers) processMergePDF(b *bot.Bot, session *types.Session, lang i18n.Lang, fileNames []string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// Получить список файлов из сессии
+	files := []contextkeys.FileInfo{}
+	if v, ok := session.Options["merge_files"]; ok {
+		if arr, ok := v.([]interface{}); ok {
+			for _, item := range arr {
+				if m, ok := item.(map[string]interface{}); ok {
+					fileID, _ := m["file_id"].(string)
+					fileName, _ := m["file_name"].(string)
+					fileSize, _ := m["file_size"].(float64)
+					files = append(files, contextkeys.FileInfo{
+						FileID:   fileID,
+						FileName: fileName,
+						FileSize: int64(fileSize),
+					})
+				}
+			}
+		}
+	}
+
+	if len(files) < 2 {
+		return
+	}
+
+	// Скачать все файлы
+	tempDir := "/app/temp"
+	pdfPaths := []string{}
+	defer func() {
+		for _, path := range pdfPaths {
+			os.Remove(path)
+		}
+	}()
+
+	for _, fi := range files {
+		path, err := bh.downloadFile(ctx, b, fi.FileID, tempDir, fi.FileName)
+		if err != nil {
+			log.Printf("Error downloading file %s: %v", fi.FileName, err)
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:    session.ChatID,
+				Text:      messages.MergePDFError(lang),
+				ParseMode: messages.ParseModeHTML,
+			})
+			return
+		}
+		pdfPaths = append(pdfPaths, path)
+	}
+
+	// Объединить PDF с помощью pdftk
+	outputPath := filepath.Join(tempDir, "merged_"+time.Now().Format("20060102_150405")+".pdf")
+	cmd := exec.Command("pdftk", append(pdfPaths, "cat", "output", outputPath)...)
+	if err := cmd.Run(); err != nil {
+		log.Printf("Error merging PDFs: %v", err)
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    session.ChatID,
+			Text:      messages.MergePDFError(lang),
+			ParseMode: messages.ParseModeHTML,
+		})
+		return
+	}
+	defer os.Remove(outputPath)
+
+	// Отправить результат
+	file, err := os.Open(outputPath)
+	if err != nil {
+		log.Printf("Error opening merged PDF: %v", err)
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    session.ChatID,
+			Text:      messages.MergePDFError(lang),
+			ParseMode: messages.ParseModeHTML,
+		})
+		return
+	}
+	defer file.Close()
+
+	_, err = b.SendDocument(ctx, &bot.SendDocumentParams{
+		ChatID: session.ChatID,
+		Document: &models.InputFileUpload{
+			Filename: "merged.pdf",
+			Data:     file,
+		},
+		Caption:   messages.MergePDFSuccess(lang),
+		ParseMode: messages.ParseModeHTML,
+	})
+
+	if err != nil {
+		log.Printf("Error sending merged PDF: %v", err)
+	}
 }

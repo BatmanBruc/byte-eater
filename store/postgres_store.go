@@ -282,7 +282,7 @@ func (s *PostgresStore) Consume(userID int64, credits int) (remaining int, unlim
 INSERT INTO user_credits (user_id, balance, reset_at)
 VALUES ($1, $2, $3)
 ON CONFLICT (user_id) DO NOTHING
-`, userID, 50, resetAt)
+`, userID, 20, resetAt)
 	if err != nil {
 		return 0, false, err
 	}
@@ -300,7 +300,7 @@ FOR UPDATE
 	}
 
 	if !currentReset.After(now) {
-		balance = 50
+		balance = 20
 		currentReset = resetAt
 		_, err = tx.Exec(ctx, `
 UPDATE user_credits
