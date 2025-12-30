@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/BatmanBruc/bat-bot-convetor/internal/contextkeys"
@@ -30,6 +31,10 @@ type Handlers struct {
 	scheduler TaskEnqueuer
 	userStore types.UserStore
 	billing   types.BillingStore
+
+	batchMu     sync.Mutex
+	batchTimers map[string]*time.Timer
+	batchTaskID map[string]string
 }
 
 func langFromSessionOrCtx(ctx context.Context, session *types.Session) i18n.Lang {
@@ -48,10 +53,12 @@ func langFromSessionOrCtx(ctx context.Context, session *types.Session) i18n.Lang
 
 func NewHandlers(store types.TaskStore, scheduler TaskEnqueuer, userStore types.UserStore, billing types.BillingStore) *Handlers {
 	return &Handlers{
-		store:     store,
-		scheduler: scheduler,
-		userStore: userStore,
-		billing:   billing,
+		store:       store,
+		scheduler:   scheduler,
+		userStore:   userStore,
+		billing:     billing,
+		batchTimers: make(map[string]*time.Timer),
+		batchTaskID: make(map[string]string),
 	}
 }
 
@@ -1513,6 +1520,27 @@ func (bh *Handlers) appendToUserBatch(ctx context.Context, b *bot.Bot, chatID in
 	}
 
 	if task == nil {
+		tasks, err := bh.store.GetSessionTasks(session.ID)
+		if err == nil {
+			for i := len(tasks) - 1; i >= 0; i-- {
+				t := tasks[i]
+				if t == nil || t.Options == nil {
+					continue
+				}
+				if v, ok := t.Options["collecting"]; ok {
+					if bv, ok := v.(bool); ok && bv && t.State == types.StateChooseExt {
+						task = t
+						taskID = t.ID
+						session.Options["collect_task_id"] = taskID
+						_ = bh.store.UpdateSession(session)
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if task == nil {
 		task = &types.Task{
 			SessionID:   session.ID,
 			State:       types.StateChooseExt,
@@ -1531,17 +1559,6 @@ func (bh *Handlers) appendToUserBatch(ctx context.Context, b *bot.Bot, chatID in
 		taskID = task.ID
 		session.Options["collect_task_id"] = taskID
 		_ = bh.store.UpdateSession(session)
-
-		msg, _ := b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    chatID,
-			Text:      messages.BatchCollecting(lang),
-			ParseMode: messages.ParseModeHTML,
-		})
-		if msg != nil {
-			task.Options["collect_msg_id"] = msg.ID
-			task.Options["collect_chat_id"] = msg.Chat.ID
-			_ = bh.store.UpdateTask(task)
-		}
 	}
 
 	list := []interface{}{}
@@ -1567,47 +1584,26 @@ func (bh *Handlers) appendToUserBatch(ctx context.Context, b *bot.Bot, chatID in
 	task.Options["lang"] = string(lang)
 	_ = bh.store.UpdateTask(task)
 
-	worker := false
-	if v, ok := task.Options["collect_worker"]; ok {
-		if b, ok := v.(bool); ok && b {
-			worker = true
-		}
-	}
-	if !worker {
-		task.Options["collect_worker"] = true
-		_ = bh.store.UpdateTask(task)
-		go bh.batchCollectorLoop(b, session.ID, task.ID)
-	}
+	bh.resetBatchTimer(b, session.ID, task.ID)
 }
 
-func (bh *Handlers) batchCollectorLoop(b *bot.Bot, sessionID string, collectorTaskID string) {
-	window := 2500 * time.Millisecond
-	for {
-		time.Sleep(window)
-		task, err := bh.store.GetTask(collectorTaskID)
-		if err != nil || task == nil || task.Options == nil {
+func (bh *Handlers) resetBatchTimer(b *bot.Bot, sessionID string, collectorTaskID string) {
+	window := 900 * time.Millisecond
+	bh.batchMu.Lock()
+	if t, ok := bh.batchTimers[sessionID]; ok && t != nil {
+		t.Stop()
+	}
+	bh.batchTaskID[sessionID] = collectorTaskID
+	bh.batchTimers[sessionID] = time.AfterFunc(window, func() {
+		bh.batchMu.Lock()
+		current := bh.batchTaskID[sessionID]
+		bh.batchMu.Unlock()
+		if strings.TrimSpace(current) != strings.TrimSpace(collectorTaskID) {
 			return
 		}
-		last := int64(0)
-		if v, ok := task.Options["collect_last"]; ok {
-			switch t := v.(type) {
-			case int64:
-				last = t
-			case int:
-				last = int64(t)
-			case float64:
-				last = int64(t)
-			}
-		}
-		if last == 0 {
-			continue
-		}
-		if time.Since(time.Unix(0, last)) < window {
-			continue
-		}
 		bh.finalizeUserBatch(b, sessionID, collectorTaskID)
-		return
-	}
+	})
+	bh.batchMu.Unlock()
 }
 
 func (bh *Handlers) finalizeUserBatch(b *bot.Bot, sessionID string, collectorTaskID string) {
@@ -1628,27 +1624,6 @@ func (bh *Handlers) finalizeUserBatch(b *bot.Bot, sessionID string, collectorTas
 	}
 
 	chatID := session.ChatID
-	msgID := 0
-	if v, ok := task.Options["collect_msg_id"]; ok {
-		switch t := v.(type) {
-		case int:
-			msgID = t
-		case int64:
-			msgID = int(t)
-		case float64:
-			msgID = int(t)
-		}
-	}
-	if v, ok := task.Options["collect_chat_id"]; ok {
-		switch t := v.(type) {
-		case int64:
-			chatID = t
-		case int:
-			chatID = int64(t)
-		case float64:
-			chatID = int64(t)
-		}
-	}
 
 	files := parseBatchFiles(task.Options["batch_files"])
 	if len(files) == 0 {
@@ -1682,6 +1657,14 @@ func (bh *Handlers) finalizeUserBatch(b *bot.Bot, sessionID string, collectorTas
 	_ = bh.store.UpdateSession(session)
 	_ = bh.store.DeleteTask(task.ID)
 
+	bh.batchMu.Lock()
+	if t, ok := bh.batchTimers[sessionID]; ok && t != nil {
+		t.Stop()
+	}
+	delete(bh.batchTimers, sessionID)
+	delete(bh.batchTaskID, sessionID)
+	bh.batchMu.Unlock()
+
 	unlimited := false
 	remaining := 0
 	if bh.billing != nil {
@@ -1695,10 +1678,6 @@ func (bh *Handlers) finalizeUserBatch(b *bot.Bot, sessionID string, collectorTas
 				remaining = r
 			}
 		}
-	}
-
-	if msgID != 0 {
-		_, _ = b.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: chatID, MessageID: msgID})
 	}
 
 	for _, extKey := range order {
