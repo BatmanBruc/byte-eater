@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     calibre \
     poppler-utils \
     pdftk \
+    qpdf \
     fonts-liberation \
     fonts-dejavu-core \
     fonts-noto \

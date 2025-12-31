@@ -1371,19 +1371,6 @@ func (bh *Handlers) handleMergePDF(ctx context.Context, b *bot.Bot, update *mode
 		}
 	}
 
-	// Отправить уведомление о начале объединения
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:    session.ChatID,
-		Text:      messages.MergePDFStarted(lang),
-		ParseMode: messages.ParseModeHTML,
-	})
-
-	// Очистить состояние
-	delete(session.Options, "merge_state")
-	delete(session.Options, "merge_files")
-	delete(session.Options, "merge_msg_id")
-	_ = bh.store.UpdateSession(session)
-
 	// Получить fileInfos из сессии до очистки
 	fileInfos := []contextkeys.FileInfo{}
 	if v, ok := session.Options["merge_files"]; ok {
@@ -1402,6 +1389,19 @@ func (bh *Handlers) handleMergePDF(ctx context.Context, b *bot.Bot, update *mode
 			}
 		}
 	}
+
+	// Очистить состояние
+	delete(session.Options, "merge_state")
+	delete(session.Options, "merge_files")
+	delete(session.Options, "merge_msg_id")
+	_ = bh.store.UpdateSession(session)
+
+	// Отправить уведомление о начале объединения
+	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:    session.ChatID,
+		Text:      messages.MergePDFStarted(lang),
+		ParseMode: messages.ParseModeHTML,
+	})
 
 	// Очистить состояние
 	delete(session.Options, "merge_state")
@@ -2474,17 +2474,73 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, session *types.Session, lang i18
 
 	log.Printf("Downloaded %d files, starting merge", len(pdfPaths))
 
-	// Объединить PDF с помощью pdftk
+	// Проверить что qpdf доступен (предпочитаем qpdf вместо pdftk)
+	checkCmd := exec.Command("which", "qpdf")
+	if checkOutput, checkErr := checkCmd.CombinedOutput(); checkErr != nil {
+		log.Printf("qpdf not found, trying pdftk: %v, output: %s", checkErr, string(checkOutput))
+		// Попробовать pdftk как fallback
+		checkCmd2 := exec.Command("which", "pdftk")
+		if checkOutput2, checkErr2 := checkCmd2.CombinedOutput(); checkErr2 != nil {
+			log.Printf("pdftk also not found: %v, output: %s", checkErr2, string(checkOutput2))
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:    session.ChatID,
+				Text:      messages.MergePDFError(lang),
+				ParseMode: messages.ParseModeHTML,
+			})
+			return
+		}
+		log.Printf("Using pdftk as fallback")
+	}
+
+	// Проверить что файлы существуют и имеют правильный размер
+	for i, path := range pdfPaths {
+		stat, err := os.Stat(path)
+		if os.IsNotExist(err) {
+			log.Printf("PDF file %d does not exist: %s", i, path)
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:    session.ChatID,
+				Text:      messages.MergePDFError(lang),
+				ParseMode: messages.ParseModeHTML,
+			})
+			return
+		}
+		if err != nil {
+			log.Printf("Error checking PDF file %d: %v", i, err)
+			return
+		}
+		log.Printf("PDF file %d exists: %s (size: %d bytes)", i, path, stat.Size())
+	}
+
+	// Объединить PDF
 	outputPath := filepath.Join(tempDir, "merged_"+time.Now().Format("20060102_150405")+".pdf")
+	log.Printf("Output path: %s", outputPath)
 
-	// Создать аргументы для pdftk
-	args := append(pdfPaths, "cat", "output", outputPath)
-	log.Printf("Running pdftk with args: %v", args)
+	var cmd *exec.Cmd
+	var toolName string
 
-	cmd := exec.Command("pdftk", args...)
+	// Проверить доступность qpdf
+	if qpdfCheck := exec.Command("which", "qpdf"); qpdfCheck.Run() == nil {
+		// Использовать qpdf: qpdf --empty --pages file1.pdf file2.pdf -- output.pdf
+		args := []string{"--empty"}
+		for _, path := range pdfPaths {
+			args = append(args, "--pages", path)
+		}
+		args = append(args, "--", outputPath)
+		cmd = exec.Command("qpdf", args...)
+		toolName = "qpdf"
+		log.Printf("Using qpdf with args: %v", args)
+	} else {
+		// Использовать pdftk как fallback: pdftk file1.pdf file2.pdf cat output output.pdf
+		args := append(pdfPaths, "cat", "output", outputPath)
+		cmd = exec.Command("pdftk", args...)
+		toolName = "pdftk"
+		log.Printf("Using pdftk with args: %v", args)
+	}
+
 	output, err := cmd.CombinedOutput()
+	log.Printf("%s command completed, output: %s", toolName, string(output))
 	if err != nil {
-		log.Printf("Error merging PDFs: %v, output: %s", err, string(output))
+		log.Printf("Error merging PDFs with %s: %v", toolName, err)
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    session.ChatID,
 			Text:      messages.MergePDFError(lang),
