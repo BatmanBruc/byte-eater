@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -23,6 +24,7 @@ import (
 	"github.com/BatmanBruc/bat-bot-convetor/types"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"golang.org/x/sync/errgroup"
 )
 
 type TaskEnqueuer interface {
@@ -2329,7 +2331,7 @@ func (bh *Handlers) addPendingSelection(userID int64, messageID int, taskID stri
 	_ = bh.userState.SetUserPending(userID, next)
 }
 
-func (bh *Handlers) downloadFile(ctx context.Context, b *bot.Bot, fileID, tempDir, fileName string) (string, error) {
+func (bh *Handlers) downloadFile(ctx context.Context, client *http.Client, b *bot.Bot, fileID, tempDir, fileName string) (string, error) {
 	fileInfo, err := b.GetFile(ctx, &bot.GetFileParams{
 		FileID: fileID,
 	})
@@ -2344,7 +2346,10 @@ func (bh *Handlers) downloadFile(ctx context.Context, b *bot.Bot, fileID, tempDi
 		return "", err
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -2371,7 +2376,9 @@ func (bh *Handlers) downloadFile(ctx context.Context, b *bot.Bot, fileID, tempDi
 }
 
 func (bh *Handlers) processMergePDF(b *bot.Bot, userID int64, chatID int64, lang i18n.Lang, fileInfos []contextkeys.FileInfo) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// Merge can involve downloading several PDFs + running pdftk + uploading result back to Telegram.
+	// In slow networks (or Telegram slowdowns) upload can take multiple minutes.
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	defer cancel()
 
 	log.Printf("Starting PDF merge for user %d with %d files", userID, len(fileInfos))
@@ -2387,27 +2394,71 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, userID int64, chatID int64, lang
 		tempDir = os.TempDir()
 	}
 	_ = os.MkdirAll(tempDir, 0755)
-	pdfPaths := []string{}
+	pdfPaths := make([]string, len(fileInfos))
 	defer func() {
 		for _, path := range pdfPaths {
-			os.Remove(path)
+			if strings.TrimSpace(path) != "" {
+				_ = os.Remove(path)
+			}
 		}
 	}()
 
-	for _, fi := range fileInfos {
-		log.Printf("Downloading file: %s (ID: %s)", fi.FileName, fi.FileID)
-		path, err := bh.downloadFile(ctx, b, fi.FileID, tempDir, fi.FileName)
-		if err != nil {
-			log.Printf("Error downloading file %s: %v", fi.FileName, err)
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID:    chatID,
-				Text:      messages.MergePDFError(lang),
-				ParseMode: messages.ParseModeHTML,
-			})
-			return
-		}
-		log.Printf("Downloaded file to: %s", path)
-		pdfPaths = append(pdfPaths, path)
+	// Dedicated HTTP client for file downloads (keep-alive + sane timeouts).
+	downloadClient := &http.Client{
+		Timeout: 10 * time.Minute,
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   10,
+			MaxConnsPerHost:       10,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
+
+	// Download PDFs concurrently to reduce total waiting time for 2+ files.
+	g, gctx := errgroup.WithContext(ctx)
+	sem := make(chan struct{}, 3)
+	for i, fi := range fileInfos {
+		i, fi := i, fi
+		g.Go(func() error {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			// pdftk/qpdf иногда ломаются на путях с не-ASCII символами (например кириллица),
+			// поэтому для merge сохраняем входные файлы с простыми ASCII именами.
+			safeName := fmt.Sprintf("merge_%03d.pdf", i+1)
+			log.Printf("Downloading file: %s (ID: %s)", fi.FileName, fi.FileID)
+
+			start := time.Now()
+			path, err := bh.downloadFile(gctx, downloadClient, b, fi.FileID, tempDir, safeName)
+			if err != nil {
+				return fmt.Errorf("download %q failed: %w", fi.FileName, err)
+			}
+			pdfPaths[i] = path
+
+			if st, err2 := os.Stat(path); err2 == nil {
+				log.Printf("Downloaded file to: %s (size=%d bytes, took=%s)", path, st.Size(), time.Since(start))
+			} else {
+				log.Printf("Downloaded file to: %s (took=%s)", path, time.Since(start))
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		log.Printf("Error downloading PDFs: %v", err)
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
+			Text:      messages.MergePDFError(lang),
+			ParseMode: messages.ParseModeHTML,
+		})
+		return
 	}
 
 	log.Printf("Downloaded %d files, starting merge", len(pdfPaths))

@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"time"
 
 	"github.com/BatmanBruc/bat-bot-convetor/internal/config"
 	"github.com/BatmanBruc/bat-bot-convetor/internal/converter"
@@ -73,7 +75,18 @@ func main() {
 		log.Println("Warning: Using default bot token. Set BOT_TOKEN environment variable.")
 	}
 
-	b, err := bot.New(botToken)
+	// Important:
+	// - getUpdates is long-polling (needs Timeout > pollTimeout)
+	// - sendDocument can upload large files (needs a much larger Timeout)
+	httpClient := &http.Client{
+		Timeout: 10 * time.Minute,
+	}
+	pollTimeout := 50 * time.Second
+
+	b, err := bot.New(
+		botToken,
+		bot.WithHTTPClient(pollTimeout, httpClient),
+	)
 	if err != nil {
 		log.Fatalf("Failed to create bot: %v", err)
 	}
