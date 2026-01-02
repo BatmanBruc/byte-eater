@@ -54,7 +54,8 @@ func main() {
 	}
 	defer rdb.Close()
 
-	taskStore := store.NewTaskStore(rdb, 24)
+	taskStore := store.NewRedisTaskStore(rdb, 24)
+	userStateStore := store.NewRedisUserStore(rdb, 24)
 
 	pgStore, err := store.NewPostgresStore(ctx, os.Getenv("POSTGRES_DSN"))
 	if err != nil {
@@ -62,7 +63,7 @@ func main() {
 	}
 	defer pgStore.Close()
 
-	middlewares := middleware.NewMessageAnalyzer(taskStore, pgStore)
+	middlewares := middleware.NewMessageAnalyzer(pgStore)
 
 	var h *handlers.Handlers
 
@@ -88,7 +89,7 @@ func main() {
 		},
 	)
 
-	h = handlers.NewHandlers(taskStore, taskScheduler, pgStore, pgStore)
+	h = handlers.NewHandlers(taskStore, userStateStore, taskScheduler, pgStore, pgStore)
 
 	taskScheduler.Start()
 	defer taskScheduler.Stop()

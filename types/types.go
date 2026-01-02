@@ -22,7 +22,7 @@ type Session struct {
 
 type Task struct {
 	ID           string                 `json:"id"`
-	SessionID    string                 `json:"session_id"`
+	UserID       int64                  `json:"user_id"`
 	State        ChatState              `json:"state"`
 	FileID       string                 `json:"file_id,omitempty"`
 	FileName     string                 `json:"file_name,omitempty"`
@@ -37,24 +37,25 @@ type Task struct {
 	ExpiresAt    time.Time              `json:"expires_at"`
 }
 
-type TaskStore interface {
-	CreateSession(session *Session) error
-	GetSession(sessionID string) (*Session, error)
-	GetUserSession(userID int64) (*Session, error)
-	UpdateSession(session *Session) error
-	UpdateSessionState(sessionID string, state ChatState) error
-	DeleteSession(sessionID string) error
+// UserStateStore хранит пользовательское состояние вне конкретных тасок:
+// язык, режимы (merge/batch), временные списки и т.п.
+type UserStateStore interface {
+	GetUserOptions(userID int64) (map[string]interface{}, error)
+	SetUserOptions(userID int64, options map[string]interface{}) error
+	GetUserPending(userID int64) ([]PendingSelection, error)
+	SetUserPending(userID int64, pending []PendingSelection) error
+}
 
+type TaskStore interface {
 	CreateTask(task *Task) error
 	GetTask(taskID string) (*Task, error)
-	GetSessionTasks(sessionID string) ([]*Task, error)
-	GetActiveTask(sessionID string) (*Task, error)
+	GetUserTasks(userID int64) ([]*Task, error)
+	GetActiveTask(userID int64) (*Task, error)
 	UpdateTask(task *Task) error
 	UpdateTaskState(taskID string, state ChatState) error
 	DeleteTask(taskID string) error
 
-	SetWaitingFile(sessionID string, targetExt string) (*Session, error)
-	SetProcessingFile(sessionID string, fileID, fileName string, fileSize int64) (*Task, error)
+	SetProcessingFile(userID int64, fileID, fileName string, fileSize int64) (*Task, error)
 	GetProcessingTasks() ([]*Task, error)
 
 	SetTaskReady(taskID, resultFileID string) error

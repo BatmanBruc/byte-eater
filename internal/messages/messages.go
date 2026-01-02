@@ -58,10 +58,10 @@ func ErrorUnknownCommand(lang i18n.Lang) string {
 
 func StartWelcome(lang i18n.Lang) string {
 	if lang == i18n.RU {
-		return "👋 <b>Привет!</b>\nЯ конвертирую файлы.\n\n" +
+	return "👋 <b>Привет!</b>\nЯ конвертирую файлы.\n\n" +
 			"📎 Отправьте файл (документ/фото/видео/аудио), <b>войс</b> или <b>кружок</b>, либо просто текст.\n" +
-			"🧩 Выберите формат в появившихся кнопках."
-	}
+		"🧩 Выберите формат в появившихся кнопках."
+}
 	return "👋 <b>Hi!</b>\nI convert files.\n\n" +
 		"📎 Send a file (document/photo/video/audio), a <b>voice message</b>, a <b>video note</b>, or just text.\n" +
 		"🧩 Pick the target format from the buttons."

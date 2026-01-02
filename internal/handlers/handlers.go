@@ -31,6 +31,7 @@ type TaskEnqueuer interface {
 
 type Handlers struct {
 	store     types.TaskStore
+	userState types.UserStateStore
 	scheduler TaskEnqueuer
 	userStore types.UserStore
 	billing   types.BillingStore
@@ -40,11 +41,51 @@ type Handlers struct {
 	batchTaskID map[string]string
 }
 
-func langFromSessionOrCtx(ctx context.Context, session *types.Session) i18n.Lang {
-	if session != nil && session.Options != nil {
-		if v, ok := session.Options["lang"]; ok {
-			if s, ok := v.(string); ok {
-				return i18n.Parse(s)
+// getUserIDFromUpdate извлекает UserID из update
+func getUserIDFromUpdate(update *models.Update) int64 {
+	if update == nil {
+		return 0
+	}
+	if update.Message != nil && update.Message.From != nil {
+		return update.Message.From.ID
+	}
+	if update.CallbackQuery != nil {
+		return update.CallbackQuery.From.ID
+	}
+	if update.PreCheckoutQuery != nil {
+		return update.PreCheckoutQuery.From.ID
+	}
+	return 0
+}
+
+// getChatIDFromUpdate извлекает ChatID из update
+func getChatIDFromUpdate(update *models.Update) int64 {
+	if update == nil {
+		return 0
+	}
+	if update.Message != nil {
+		return update.Message.Chat.ID
+	}
+	if update.CallbackQuery != nil {
+		if update.CallbackQuery.Message.Message != nil {
+			return update.CallbackQuery.Message.Message.Chat.ID
+		}
+		if update.CallbackQuery.Message.InaccessibleMessage != nil {
+			return update.CallbackQuery.Message.InaccessibleMessage.Chat.ID
+		}
+	}
+	return 0
+}
+
+// langFromUserOrCtx получает язык из user options или контекста
+func (bh *Handlers) langFromUserOrCtx(ctx context.Context, userID int64) i18n.Lang {
+	if bh.userState != nil {
+		options, err := bh.userState.GetUserOptions(userID)
+		if err == nil && options != nil {
+			if v, ok := options["lang"]; ok {
+				if s, ok := v.(string); ok {
+					return i18n.Parse(s)
+				}
 			}
 		}
 	}
@@ -54,9 +95,10 @@ func langFromSessionOrCtx(ctx context.Context, session *types.Session) i18n.Lang
 	return i18n.EN
 }
 
-func NewHandlers(store types.TaskStore, scheduler TaskEnqueuer, userStore types.UserStore, billing types.BillingStore) *Handlers {
+func NewHandlers(store types.TaskStore, userState types.UserStateStore, scheduler TaskEnqueuer, userStore types.UserStore, billing types.BillingStore) *Handlers {
 	return &Handlers{
 		store:       store,
+		userState:   userState,
 		scheduler:   scheduler,
 		userStore:   userStore,
 		billing:     billing,
@@ -66,61 +108,49 @@ func NewHandlers(store types.TaskStore, scheduler TaskEnqueuer, userStore types.
 }
 
 func (bh *Handlers) MainHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
-	chatID := bh.getChatIDFromUpdate(update)
+	chatID := getChatIDFromUpdate(update)
+	userID, is := contextkeys.GetUserID(ctx)
+	if !is {
+		log.Printf("Error: UserID not found")
+		if chatID != 0 {
+			lang := i18n.EN
+			if v, ok := contextkeys.GetLang(ctx); ok {
+				lang = i18n.Parse(v)
+			}
+			b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:    chatID,
+				Text:      messages.ErrorDefault(lang),
+				ParseMode: messages.ParseModeHTML,
+			})
+		}
+		return
+	}
+
 	messageType, _ := contextkeys.GetMessageType(ctx)
-	lang := i18n.EN
-	if v, ok := contextkeys.GetLang(ctx); ok {
-		lang = i18n.Parse(v)
-	}
-
-	sessionID, ok := contextkeys.GetSessionID(ctx)
-	if !ok {
-		log.Printf("Error: SessionID not found in context")
-		if chatID != 0 {
-			b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID:    chatID,
-				Text:      messages.ErrorDefault(lang),
-				ParseMode: messages.ParseModeHTML,
-			})
-		}
-		return
-	}
-
-	session, err := bh.store.GetSession(sessionID)
-	if err != nil {
-		log.Printf("Error getting session: %v", err)
-		if chatID != 0 {
-			b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID:    chatID,
-				Text:      messages.ErrorDefault(lang),
-				ParseMode: messages.ParseModeHTML,
-			})
-		}
-		return
-	}
+	lang := bh.langFromUserOrCtx(ctx, userID)
 
 	switch messageType {
 	case contextkeys.MessageTypeCommand:
-		bh.HandleCommand(ctx, b, update, session)
+		bh.HandleCommand(ctx, b, update, userID)
 	case contextkeys.MessageTypeDocument, contextkeys.MessageTypePhoto, contextkeys.MessageTypeVideo,
 		contextkeys.MessageTypeAudio, contextkeys.MessageTypeVoice:
-		bh.HandleFile(ctx, b, update, session)
+		bh.HandleFile(ctx, b, update, userID)
 	case contextkeys.MessageTypeText:
-		bh.HandleText(ctx, b, update, session)
+		bh.HandleText(ctx, b, update, userID)
 	case contextkeys.MessageTypeClickButton:
 		data, _ := contextkeys.GetCallbackData(ctx)
 		if data == "" && update.CallbackQuery != nil {
 			data = update.CallbackQuery.Data
 		}
 		if strings.HasPrefix(strings.TrimSpace(data), "menu_") {
-			bh.HandleMenuClick(ctx, b, update, session)
+			bh.HandleMenuClick(ctx, b, update, userID)
 		} else {
-			bh.HandleClickButton(ctx, b, update, session)
+			bh.HandleClickButton(ctx, b, update, userID)
 		}
 	case contextkeys.MessageTypePreCheckout:
-		bh.HandlePreCheckout(ctx, b, update, session)
+		bh.HandlePreCheckout(ctx, b, update, userID)
 	case contextkeys.MessageTypePayment:
-		bh.HandleSuccessfulPayment(ctx, b, update, session)
+		bh.HandleSuccessfulPayment(ctx, b, update, userID)
 	default:
 		if chatID != 0 {
 			b.SendMessage(ctx, &bot.SendMessageParams{
@@ -132,11 +162,11 @@ func (bh *Handlers) MainHandler(ctx context.Context, b *bot.Bot, update *models.
 	}
 }
 
-func (bh *Handlers) HandlePreCheckout(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session) {
+func (bh *Handlers) HandlePreCheckout(ctx context.Context, b *bot.Bot, update *models.Update, userID int64) {
 	if update == nil || update.PreCheckoutQuery == nil {
 		return
 	}
-	lang := langFromSessionOrCtx(ctx, session)
+	lang := bh.langFromUserOrCtx(ctx, userID)
 	payload := strings.TrimSpace(update.PreCheckoutQuery.InvoicePayload)
 	expected := strings.TrimSpace(os.Getenv("SUB_PAYLOAD"))
 	if expected == "" {
@@ -158,11 +188,15 @@ func (bh *Handlers) HandlePreCheckout(ctx context.Context, b *bot.Bot, update *m
 	})
 }
 
-func (bh *Handlers) HandleSuccessfulPayment(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session) {
+func (bh *Handlers) HandleSuccessfulPayment(ctx context.Context, b *bot.Bot, update *models.Update, userID int64) {
 	if update == nil || update.Message == nil || update.Message.SuccessfulPayment == nil {
 		return
 	}
-	lang := langFromSessionOrCtx(ctx, session)
+	lang := bh.langFromUserOrCtx(ctx, userID)
+	chatID := getChatIDFromUpdate(update)
+	if chatID == 0 {
+		chatID = userID
+	}
 	p := update.Message.SuccessfulPayment
 	payload := strings.TrimSpace(p.InvoicePayload)
 	expected := strings.TrimSpace(os.Getenv("SUB_PAYLOAD"))
@@ -176,7 +210,7 @@ func (bh *Handlers) HandleSuccessfulPayment(ctx context.Context, b *bot.Bot, upd
 		return
 	}
 	inserted, err := bh.userStore.RecordPayment(types.Payment{
-		UserID: session.UserID,
+		UserID: userID,
 		Provider: func() string {
 			if strings.EqualFold(strings.TrimSpace(p.Currency), "XTR") {
 				return "stars"
@@ -195,14 +229,14 @@ func (bh *Handlers) HandleSuccessfulPayment(ctx context.Context, b *bot.Bot, upd
 	}
 	if !inserted {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    session.ChatID,
+			ChatID:    chatID,
 			Text:      messages.PaymentAlreadyProcessed(lang),
 			ParseMode: messages.ParseModeHTML,
 		})
 		return
 	}
 
-	sub, err := bh.userStore.ActivateOrExtendUnlimited(session.UserID, 30*24*time.Hour)
+	sub, err := bh.userStore.ActivateOrExtendUnlimited(userID, 30*24*time.Hour)
 	if err != nil {
 		return
 	}
@@ -211,7 +245,7 @@ func (bh *Handlers) HandleSuccessfulPayment(ctx context.Context, b *bot.Bot, upd
 		until = sub.ExpiresAt.UTC()
 	}
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:    session.ChatID,
+		ChatID:    chatID,
 		Text:      messages.PaymentSucceeded(lang, until),
 		ParseMode: messages.ParseModeHTML,
 	})
@@ -254,11 +288,11 @@ func (bh *Handlers) sendMainMenu(ctx context.Context, b *bot.Bot, chatID int64, 
 	})
 }
 
-func (bh *Handlers) HandleMenuClick(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session) {
+func (bh *Handlers) HandleMenuClick(ctx context.Context, b *bot.Bot, update *models.Update, userID int64) {
 	if update == nil || update.CallbackQuery == nil {
 		return
 	}
-	lang := langFromSessionOrCtx(ctx, session)
+	lang := bh.langFromUserOrCtx(ctx, userID)
 	data, _ := contextkeys.GetCallbackData(ctx)
 	if data == "" {
 		data = update.CallbackQuery.Data
@@ -270,41 +304,47 @@ func (bh *Handlers) HandleMenuClick(ctx context.Context, b *bot.Bot, update *mod
 		return
 	}
 	msg := update.CallbackQuery.Message.Message
+	chatID := getChatIDFromUpdate(update)
+	if chatID == 0 {
+		chatID = userID
+	}
 
 	text := messages.MainMenuText(lang)
 	keyboard := bh.buildMenuKeyboard(lang, false)
 
 	switch data {
 	case "menu_batch":
-		if session.Options == nil {
-			session.Options = map[string]interface{}{}
+		options, _ := bh.userState.GetUserOptions(userID)
+		if options == nil {
+			options = map[string]interface{}{}
 		}
-		delete(session.Options, "mb_state")
-		delete(session.Options, "mb_expected")
-		delete(session.Options, "mb_files")
-		_ = bh.store.UpdateSession(session)
+		delete(options, "mb_state")
+		delete(options, "mb_expected")
+		delete(options, "mb_files")
+		_ = bh.userState.SetUserOptions(userID, options)
 
-		session.Options["mb_state"] = "await_count"
-		_ = bh.store.UpdateSession(session)
+		options["mb_state"] = "await_count"
+		_ = bh.userState.SetUserOptions(userID, options)
 		_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, "")
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    session.ChatID,
+			ChatID:    chatID,
 			Text:      messages.BatchHowManyPrompt(lang),
 			ParseMode: messages.ParseModeHTML,
 		})
 		return
 	case "menu_merge_pdf":
-		if session.Options == nil {
-			session.Options = map[string]interface{}{}
+		options, _ := bh.userState.GetUserOptions(userID)
+		if options == nil {
+			options = map[string]interface{}{}
 		}
-		delete(session.Options, "merge_state")
-		delete(session.Options, "merge_files")
-		delete(session.Options, "merge_msg_id")
-		session.Options["merge_state"] = "waiting"
-		_ = bh.store.UpdateSession(session)
+		delete(options, "merge_state")
+		delete(options, "merge_files")
+		delete(options, "merge_msg_id")
+		options["merge_state"] = "waiting"
+		_ = bh.userState.SetUserOptions(userID, options)
 		_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, "")
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    session.ChatID,
+			ChatID:    chatID,
 			Text:      messages.MergePDFWaiting(lang),
 			ParseMode: messages.ParseModeHTML,
 		})
@@ -313,7 +353,7 @@ func (bh *Handlers) HandleMenuClick(ctx context.Context, b *bot.Bot, update *mod
 		active := false
 		var expiresAt *time.Time
 		if bh.userStore != nil {
-			sub, err := bh.userStore.GetSubscription(session.UserID)
+			sub, err := bh.userStore.GetSubscription(userID)
 			if err == nil && sub != nil {
 				if strings.EqualFold(strings.TrimSpace(sub.Status), "active") && strings.EqualFold(strings.TrimSpace(sub.Plan), "unlimited") {
 					if sub.ExpiresAt == nil || sub.ExpiresAt.After(time.Now()) {
@@ -323,7 +363,7 @@ func (bh *Handlers) HandleMenuClick(ctx context.Context, b *bot.Bot, update *mod
 				}
 			}
 		} else if bh.billing != nil {
-			u, _ := bh.billing.IsUnlimited(session.UserID)
+			u, _ := bh.billing.IsUnlimited(userID)
 			active = u
 		}
 
@@ -455,34 +495,19 @@ func (bh *Handlers) sendSubscriptionInvoiceYooKassa(ctx context.Context, b *bot.
 	return err == nil
 }
 
-func (bh *Handlers) getChatIDFromUpdate(update *models.Update) int64 {
-	if update == nil {
-		return 0
-	}
-	if update.Message != nil {
-		return update.Message.Chat.ID
-	}
-	if update.CallbackQuery != nil {
-		if update.CallbackQuery.Message.Message != nil {
-			return update.CallbackQuery.Message.Message.Chat.ID
-		}
-		if update.CallbackQuery.Message.InaccessibleMessage != nil {
-			return update.CallbackQuery.Message.InaccessibleMessage.Chat.ID
-		}
-	}
-	return 0
-}
-
-func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session) {
+func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *models.Update, userID int64) {
 	if update.CallbackQuery == nil {
 		return
 	}
-	lang := langFromSessionOrCtx(ctx, session)
+	lang := bh.langFromUserOrCtx(ctx, userID)
 	chatID := int64(0)
 	messageID := 0
 	if update.CallbackQuery.Message.Message != nil {
 		chatID = update.CallbackQuery.Message.Message.Chat.ID
 		messageID = update.CallbackQuery.Message.Message.ID
+	}
+	if chatID == 0 {
+		chatID = userID
 	}
 
 	data, _ := contextkeys.GetCallbackData(ctx)
@@ -491,7 +516,7 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 	}
 
 	if data == "merge_pdf" {
-		bh.handleMergePDF(ctx, b, update, session, lang)
+		bh.handleMergePDF(ctx, b, update, userID, lang)
 		return
 	}
 
@@ -504,7 +529,7 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 	format = strings.ToLower(format)
 
 	if format == "batch_sep" || format == "batch_all" {
-		bh.handleBatchChoice(ctx, b, update, session, lang, taskID, format)
+		bh.handleBatchChoice(ctx, b, update, userID, lang, taskID, format)
 		return
 	}
 	action := ""
@@ -599,7 +624,7 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 		return
 	}
 
-	if task.SessionID != session.ID {
+	if task.UserID != userID {
 		_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, messages.CallbackTaskNotInSession(lang))
 		return
 	}
@@ -610,7 +635,7 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 
 	if v, ok := task.Options["batch_mode"]; ok {
 		if s, ok := v.(string); ok && strings.TrimSpace(s) == "all" {
-			bh.handleBatchFormatSelection(ctx, b, update, session, lang, task, targetExt)
+			bh.handleBatchFormatSelection(ctx, b, update, userID, lang, task, targetExt)
 			return
 		}
 	}
@@ -649,10 +674,10 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 	unlimited := false
 	remaining := 0
 	if credits > 0 && bh.billing != nil {
-		r, u, err := bh.billing.Consume(session.UserID, credits)
+		r, u, err := bh.billing.Consume(userID, credits)
 		if err != nil {
 			if err == store.ErrInsufficientCredits {
-				bh.refreshPendingSelections(ctx, b, session, lang, false, r, messageID, taskID)
+				bh.refreshPendingSelections(ctx, b, userID, lang, false, r, messageID, taskID)
 				bh.refreshSelectionMessage(ctx, b, chatID, messageID, lang, task, false, r)
 				_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackInsufficientCredits(lang, r))
 				return
@@ -664,10 +689,10 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 		unlimited = u
 		remaining = r
 	} else if bh.billing != nil {
-		u, _ := bh.billing.IsUnlimited(session.UserID)
+		u, _ := bh.billing.IsUnlimited(userID)
 		unlimited = u
 		if !unlimited {
-			r, _ := bh.billing.GetOrResetBalance(session.UserID)
+			r, _ := bh.billing.GetOrResetBalance(userID)
 			remaining = r
 		}
 	}
@@ -799,9 +824,8 @@ func (bh *Handlers) HandleClickButton(ctx context.Context, b *bot.Bot, update *m
 		})
 	}
 
-	bh.removePendingSelection(session, messageID, taskID)
-	_ = bh.store.UpdateSession(session)
-	bh.refreshPendingSelections(ctx, b, session, lang, unlimited, remaining, messageID, taskID)
+	bh.removePendingSelection(userID, messageID, taskID)
+	bh.refreshPendingSelections(ctx, b, userID, lang, unlimited, remaining, messageID, taskID)
 	_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, "")
 }
 
@@ -916,13 +940,11 @@ func (bh *Handlers) refreshSelectionMessage(ctx context.Context, b *bot.Bot, cha
 	})
 }
 
-func (bh *Handlers) refreshPendingSelections(ctx context.Context, b *bot.Bot, session *types.Session, lang i18n.Lang, unlimited bool, remaining int, excludeMessageID int, excludeTaskID string) {
-	if session == nil {
-		return
-	}
+func (bh *Handlers) refreshPendingSelections(ctx context.Context, b *bot.Bot, userID int64, lang i18n.Lang, unlimited bool, remaining int, excludeMessageID int, excludeTaskID string) {
+	pending, _ := bh.userState.GetUserPending(userID)
 	excludeTaskID = strings.TrimSpace(excludeTaskID)
-	next := make([]types.PendingSelection, 0, len(session.Pending))
-	for _, p := range session.Pending {
+	next := make([]types.PendingSelection, 0, len(pending))
+	for _, p := range pending {
 		if p.MessageID == 0 || strings.TrimSpace(p.TaskID) == "" {
 			continue
 		}
@@ -984,8 +1006,10 @@ func (bh *Handlers) refreshPendingSelections(ctx context.Context, b *bot.Bot, se
 				}
 			}
 		}
+		// Получаем chatID из задачи (используем userID как chatID для личных чатов)
+		chatID := task.UserID
 		_, err = b.EditMessageText(ctx, &bot.EditMessageTextParams{
-			ChatID:    session.ChatID,
+			ChatID:    chatID,
 			MessageID: p.MessageID,
 			Text:      text,
 			ParseMode: messages.ParseModeHTML,
@@ -998,20 +1022,17 @@ func (bh *Handlers) refreshPendingSelections(ctx context.Context, b *bot.Bot, se
 		}
 		next = append(next, p)
 	}
-	session.Pending = next
-	_ = bh.store.UpdateSession(session)
+	_ = bh.userState.SetUserPending(userID, next)
 }
 
-func (bh *Handlers) removePendingSelection(session *types.Session, messageID int, taskID string) {
-	if session == nil {
-		return
-	}
+func (bh *Handlers) removePendingSelection(userID int64, messageID int, taskID string) {
 	taskID = strings.TrimSpace(taskID)
 	if messageID == 0 && taskID == "" {
 		return
 	}
-	next := make([]types.PendingSelection, 0, len(session.Pending))
-	for _, p := range session.Pending {
+	pending, _ := bh.userState.GetUserPending(userID)
+	next := make([]types.PendingSelection, 0, len(pending))
+	for _, p := range pending {
 		if p.MessageID == 0 || strings.TrimSpace(p.TaskID) == "" {
 			continue
 		}
@@ -1023,12 +1044,12 @@ func (bh *Handlers) removePendingSelection(session *types.Session, messageID int
 		}
 		next = append(next, p)
 	}
-	session.Pending = next
+	_ = bh.userState.SetUserPending(userID, next)
 }
 
-func (bh *Handlers) HandleCommand(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session) {
+func (bh *Handlers) HandleCommand(ctx context.Context, b *bot.Bot, update *models.Update, userID int64) {
 	command := strings.TrimSpace(update.Message.Text)
-	lang := langFromSessionOrCtx(ctx, session)
+	lang := bh.langFromUserOrCtx(ctx, userID)
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
 		return
@@ -1040,7 +1061,7 @@ func (bh *Handlers) HandleCommand(ctx context.Context, b *bot.Bot, update *model
 
 	switch cmd {
 	case "/grant_unlimited":
-		if !isAdminUser(session.UserID) {
+		if !isAdminUser(userID) {
 			b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID:    update.Message.Chat.ID,
 				Text:      messages.ErrorUnknownCommand(lang),
@@ -1085,7 +1106,7 @@ func (bh *Handlers) HandleCommand(ctx context.Context, b *bot.Bot, update *model
 			arg = "30"
 		}
 		if strings.EqualFold(arg, "forever") {
-			sub := types.Subscription{UserID: session.UserID, Plan: "unlimited", Status: "active", ExpiresAt: nil}
+			sub := types.Subscription{UserID: userID, Plan: "unlimited", Status: "active", ExpiresAt: nil}
 			_ = bh.userStore.UpsertSubscription(sub)
 			b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID:    update.Message.Chat.ID,
@@ -1103,7 +1124,7 @@ func (bh *Handlers) HandleCommand(ctx context.Context, b *bot.Bot, update *model
 			})
 			return
 		}
-		sub, err := bh.userStore.ActivateOrExtendUnlimited(session.UserID, time.Duration(days)*24*time.Hour)
+		sub, err := bh.userStore.ActivateOrExtendUnlimited(userID, time.Duration(days)*24*time.Hour)
 		if err != nil {
 			b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID:    update.Message.Chat.ID,
@@ -1119,15 +1140,11 @@ func (bh *Handlers) HandleCommand(ctx context.Context, b *bot.Bot, update *model
 		})
 		return
 	case "/start":
-		session.State = types.StateStart
-		session.TargetExt = ""
-		if err := bh.store.UpdateSession(session); err != nil {
-			log.Printf("Error updating session: %v", err)
-		}
 		bh.sendMainMenu(ctx, b, update.Message.Chat.ID, lang)
 	case "/lang":
-		if session.Options == nil {
-			session.Options = map[string]interface{}{}
+		options, _ := bh.userState.GetUserOptions(userID)
+		if options == nil {
+			options = map[string]interface{}{}
 		}
 		if len(fields) < 2 {
 			b.SendMessage(ctx, &bot.SendMessageParams{
@@ -1140,8 +1157,8 @@ func (bh *Handlers) HandleCommand(ctx context.Context, b *bot.Bot, update *model
 		arg := strings.ToLower(strings.TrimSpace(fields[1]))
 		switch arg {
 		case "ru", "en":
-			session.Options["lang"] = arg
-			_ = bh.store.UpdateSession(session)
+			options["lang"] = arg
+			_ = bh.userState.SetUserOptions(userID, options)
 			newLang := i18n.Parse(arg)
 			b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID:    update.Message.Chat.ID,
@@ -1149,11 +1166,11 @@ func (bh *Handlers) HandleCommand(ctx context.Context, b *bot.Bot, update *model
 				ParseMode: messages.ParseModeHTML,
 			})
 		case "auto":
-			delete(session.Options, "lang")
-			_ = bh.store.UpdateSession(session)
+			delete(options, "lang")
+			_ = bh.userState.SetUserOptions(userID, options)
 			b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID:    update.Message.Chat.ID,
-				Text:      messages.LangAuto(langFromSessionOrCtx(ctx, session)),
+				Text:      messages.LangAuto(bh.langFromUserOrCtx(ctx, userID)),
 				ParseMode: messages.ParseModeHTML,
 			})
 		default:
@@ -1168,9 +1185,9 @@ func (bh *Handlers) HandleCommand(ctx context.Context, b *bot.Bot, update *model
 		if bh.billing == nil {
 			text = messages.BalanceUnavailable(lang)
 		} else {
-			unlimited, _ := bh.billing.IsUnlimited(session.UserID)
+			unlimited, _ := bh.billing.IsUnlimited(userID)
 			if !unlimited {
-				rem, err := bh.billing.GetOrResetBalance(session.UserID)
+				rem, err := bh.billing.GetOrResetBalance(userID)
 				if err != nil {
 					text = messages.BalanceUnavailable(lang)
 				} else {
@@ -1188,7 +1205,7 @@ func (bh *Handlers) HandleCommand(ctx context.Context, b *bot.Bot, update *model
 	case "/subscribe":
 		unlimited := false
 		if bh.billing != nil {
-			u, _ := bh.billing.IsUnlimited(session.UserID)
+			u, _ := bh.billing.IsUnlimited(userID)
 			unlimited = u
 		}
 		text := messages.SubscriptionInfo(lang, unlimited) + "\n\n" + messages.MenuBtnContact(lang) + ": @esteticcus"
@@ -1248,17 +1265,24 @@ func adminSecretOK(secret string) bool {
 	return secret == expected
 }
 
-func (bh *Handlers) handleMergePDFFile(ctx context.Context, b *bot.Bot, session *types.Session, lang i18n.Lang, files []contextkeys.FileInfo) {
-	if session == nil || session.Options == nil || len(files) == 0 {
+func (bh *Handlers) handleMergePDFFile(ctx context.Context, b *bot.Bot, userID int64, lang i18n.Lang, files []contextkeys.FileInfo) {
+	if len(files) == 0 {
 		return
 	}
+
+	options, _ := bh.userState.GetUserOptions(userID)
+	if options == nil {
+		options = map[string]interface{}{}
+	}
+
+	chatID := userID // Для личных чатов используем userID как chatID
 
 	// Проверить что файл - PDF
 	for _, fi := range files {
 		ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(fi.FileName), "."))
 		if ext != "pdf" {
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID:    session.ChatID,
+				ChatID:    chatID,
 				Text:      messages.ErrorUnsupportedFormat(lang),
 				ParseMode: messages.ParseModeHTML,
 			})
@@ -1268,7 +1292,7 @@ func (bh *Handlers) handleMergePDFFile(ctx context.Context, b *bot.Bot, session 
 
 	// Добавить файлы в список
 	list := []interface{}{}
-	if v, ok := session.Options["merge_files"]; ok {
+	if v, ok := options["merge_files"]; ok {
 		if arr, ok := v.([]interface{}); ok {
 			list = arr
 		}
@@ -1281,22 +1305,34 @@ func (bh *Handlers) handleMergePDFFile(ctx context.Context, b *bot.Bot, session 
 			"file_size": fi.FileSize,
 		})
 	}
-	session.Options["merge_files"] = list
-	_ = bh.store.UpdateSession(session)
+	options["merge_files"] = list
 
-	// Удалить предыдущее сообщение если есть
-	if msgID, ok := session.Options["merge_msg_id"]; ok {
-		if id, ok := msgID.(int); ok {
-			log.Printf("Deleting previous merge message: %d", id)
+	// Удалить предыдущее сообщение если есть (ДО обновления options)
+	var oldMsgID int
+	if msgID, ok := options["merge_msg_id"]; ok {
+		switch v := msgID.(type) {
+		case int:
+			oldMsgID = v
+		case int64:
+			oldMsgID = int(v)
+		case float64:
+			oldMsgID = int(v)
+		}
+		if oldMsgID > 0 {
+			log.Printf("Deleting previous merge message: %d", oldMsgID)
 			_, err := b.DeleteMessage(ctx, &bot.DeleteMessageParams{
-				ChatID:    session.ChatID,
-				MessageID: id,
+				ChatID:    chatID,
+				MessageID: oldMsgID,
 			})
 			if err != nil {
-				log.Printf("Error deleting message %d: %v", id, err)
+				log.Printf("Error deleting message %d: %v", oldMsgID, err)
+			} else {
+				log.Printf("Successfully deleted message %d", oldMsgID)
 			}
 		}
 	}
+
+	_ = bh.userState.SetUserOptions(userID, options)
 
 	// Получить список имен файлов
 	fileNames := []string{}
@@ -1310,7 +1346,7 @@ func (bh *Handlers) handleMergePDFFile(ctx context.Context, b *bot.Bot, session 
 
 	// Отправить новое сообщение со списком и кнопкой
 	sent, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:    session.ChatID,
+		ChatID:    chatID,
 		Text:      messages.MergePDFFilesList(lang, fileNames),
 		ParseMode: messages.ParseModeHTML,
 		ReplyMarkup: &models.InlineKeyboardMarkup{
@@ -1324,21 +1360,22 @@ func (bh *Handlers) handleMergePDFFile(ctx context.Context, b *bot.Bot, session 
 
 	if err == nil && sent != nil {
 		log.Printf("Saved new merge message ID: %d", sent.ID)
-		session.Options["merge_msg_id"] = sent.ID
-		_ = bh.store.UpdateSession(session)
+		options["merge_msg_id"] = sent.ID
+		_ = bh.userState.SetUserOptions(userID, options)
 	} else if err != nil {
 		log.Printf("Error sending merge message: %v", err)
 	}
 }
 
-func (bh *Handlers) handleMergePDF(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session, lang i18n.Lang) {
-	if session.Options == nil {
+func (bh *Handlers) handleMergePDF(ctx context.Context, b *bot.Bot, update *models.Update, userID int64, lang i18n.Lang) {
+	options, _ := bh.userState.GetUserOptions(userID)
+	if options == nil {
 		_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackTaskNotFound(lang))
 		return
 	}
 
 	files := []string{}
-	if v, ok := session.Options["merge_files"]; ok {
+	if v, ok := options["merge_files"]; ok {
 		if arr, ok := v.([]interface{}); ok {
 			for _, item := range arr {
 				if m, ok := item.(map[string]interface{}); ok {
@@ -1357,12 +1394,17 @@ func (bh *Handlers) handleMergePDF(ctx context.Context, b *bot.Bot, update *mode
 
 	_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, "")
 
+	chatID := getChatIDFromUpdate(update)
+	if chatID == 0 {
+		chatID = userID
+	}
+
 	// Удалить сообщение со списком файлов
-	if msgID, ok := session.Options["merge_msg_id"]; ok {
+	if msgID, ok := options["merge_msg_id"]; ok {
 		if id, ok := msgID.(int); ok {
 			log.Printf("Deleting merge message after button click: %d", id)
 			_, err := b.DeleteMessage(ctx, &bot.DeleteMessageParams{
-				ChatID:    session.ChatID,
+				ChatID:    chatID,
 				MessageID: id,
 			})
 			if err != nil {
@@ -1371,9 +1413,9 @@ func (bh *Handlers) handleMergePDF(ctx context.Context, b *bot.Bot, update *mode
 		}
 	}
 
-	// Получить fileInfos из сессии до очистки
+	// Получить fileInfos из options до очистки
 	fileInfos := []contextkeys.FileInfo{}
-	if v, ok := session.Options["merge_files"]; ok {
+	if v, ok := options["merge_files"]; ok {
 		if arr, ok := v.([]interface{}); ok {
 			for _, item := range arr {
 				if m, ok := item.(map[string]interface{}); ok {
@@ -1391,35 +1433,29 @@ func (bh *Handlers) handleMergePDF(ctx context.Context, b *bot.Bot, update *mode
 	}
 
 	// Очистить состояние
-	delete(session.Options, "merge_state")
-	delete(session.Options, "merge_files")
-	delete(session.Options, "merge_msg_id")
-	_ = bh.store.UpdateSession(session)
+	delete(options, "merge_state")
+	delete(options, "merge_files")
+	delete(options, "merge_msg_id")
+	_ = bh.userState.SetUserOptions(userID, options)
 
 	// Отправить уведомление о начале объединения
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:    session.ChatID,
+		ChatID:    chatID,
 		Text:      messages.MergePDFStarted(lang),
 		ParseMode: messages.ParseModeHTML,
 	})
 
-	// Очистить состояние
-	delete(session.Options, "merge_state")
-	delete(session.Options, "merge_files")
-	delete(session.Options, "merge_msg_id")
-	_ = bh.store.UpdateSession(session)
-
 	// Запустить объединение
-	go bh.processMergePDF(b, session, lang, fileInfos)
+	go bh.processMergePDF(b, userID, chatID, lang, fileInfos)
 }
 
-func (bh *Handlers) handleBatchChoice(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session, lang i18n.Lang, batchTaskID string, choice string) {
+func (bh *Handlers) handleBatchChoice(ctx context.Context, b *bot.Bot, update *models.Update, userID int64, lang i18n.Lang, batchTaskID string, choice string) {
 	task, err := bh.store.GetTask(batchTaskID)
 	if err != nil || task == nil || task.Options == nil {
 		_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackTaskNotFound(lang))
 		return
 	}
-	if task.SessionID != session.ID {
+	if task.UserID != userID {
 		_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackTaskNotInSession(lang))
 		return
 	}
@@ -1430,6 +1466,11 @@ func (bh *Handlers) handleBatchChoice(ctx context.Context, b *bot.Bot, update *m
 		return
 	}
 
+	chatID := getChatIDFromUpdate(update)
+	if chatID == 0 {
+		chatID = userID
+	}
+
 	if choice == "batch_sep" {
 		if update != nil && update.CallbackQuery != nil && update.CallbackQuery.Message.Message != nil {
 			msg := update.CallbackQuery.Message.Message
@@ -1437,7 +1478,7 @@ func (bh *Handlers) handleBatchChoice(ctx context.Context, b *bot.Bot, update *m
 		}
 		_ = bh.store.DeleteTask(task.ID)
 		for _, f := range files {
-			bh.createAndAskFormatForSingleFile(ctx, b, session, lang, f)
+			bh.createAndAskFormatForSingleFile(ctx, b, userID, lang, f)
 		}
 		_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, "")
 		return
@@ -1454,11 +1495,11 @@ func (bh *Handlers) handleBatchChoice(ctx context.Context, b *bot.Bot, update *m
 		keyboard := bh.buildInlineKeyboard(buttons)
 		text := messages.BatchChooseFormat(lang, task.OriginalExt, len(files))
 		if bh.billing != nil {
-			unlimited, err := bh.billing.IsUnlimited(session.UserID)
+			unlimited, err := bh.billing.IsUnlimited(userID)
 			if err == nil && unlimited {
 				text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
 			} else if err == nil {
-				rem, err := bh.billing.GetOrResetBalance(session.UserID)
+				rem, err := bh.billing.GetOrResetBalance(userID)
 				if err == nil {
 					text = text + "\n\n" + messages.CreditsRemainingLine(lang, rem)
 					if rem <= 0 {
@@ -1473,7 +1514,7 @@ func (bh *Handlers) handleBatchChoice(ctx context.Context, b *bot.Bot, update *m
 			_, _ = b.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: msg.Chat.ID, MessageID: msg.ID})
 		}
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    session.ChatID,
+			ChatID:    chatID,
 			Text:      text,
 			ParseMode: messages.ParseModeHTML,
 			ReplyMarkup: &models.InlineKeyboardMarkup{
@@ -1531,13 +1572,13 @@ func parseBatchFiles(v interface{}) []formats.BatchFile {
 	return out
 }
 
-func (bh *Handlers) createAndAskFormatForSingleFile(ctx context.Context, b *bot.Bot, session *types.Session, lang i18n.Lang, f formats.BatchFile) {
+func (bh *Handlers) createAndAskFormatForSingleFile(ctx context.Context, b *bot.Bot, userID int64, lang i18n.Lang, f formats.BatchFile) {
 	fileName := strings.TrimSpace(f.FileName)
 	if fileName == "" {
-		fileName = fmt.Sprintf("file_%d.%s", time.Now().UnixNano(), strings.ToLower(strings.TrimSpace(session.TargetExt)))
+		fileName = fmt.Sprintf("file_%d.txt", time.Now().UnixNano())
 	}
 	ext := bh.getExtensionFromFileName(fileName)
-	task, err := bh.store.SetProcessingFile(session.ID, f.FileID, fileName, f.FileSize)
+	task, err := bh.store.SetProcessingFile(userID, f.FileID, fileName, f.FileSize)
 	if err != nil {
 		return
 	}
@@ -1561,12 +1602,13 @@ func (bh *Handlers) createAndAskFormatForSingleFile(ctx context.Context, b *bot.
 	}
 	keyboard := bh.buildInlineKeyboard(buttons)
 	text := messages.FileReceivedChooseFormat(lang, fileName)
+	chatID := userID // Для личных чатов используем userID как chatID
 	if bh.billing != nil {
-		unlimited, err := bh.billing.IsUnlimited(session.UserID)
+		unlimited, err := bh.billing.IsUnlimited(userID)
 		if err == nil && unlimited {
 			text = text + "\n\n" + messages.PlanUnlimitedLine(lang)
 		} else if err == nil {
-			rem, err := bh.billing.GetOrResetBalance(session.UserID)
+			rem, err := bh.billing.GetOrResetBalance(userID)
 			if err == nil {
 				text = text + "\n\n" + messages.CreditsRemainingLine(lang, rem)
 				if rem <= 0 {
@@ -1576,18 +1618,17 @@ func (bh *Handlers) createAndAskFormatForSingleFile(ctx context.Context, b *bot.
 		}
 	}
 	sent, _ := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:      session.ChatID,
+		ChatID:      chatID,
 		Text:        text,
 		ParseMode:   messages.ParseModeHTML,
 		ReplyMarkup: keyboard,
 	})
 	if sent != nil {
-		bh.addPendingSelection(session, sent.ID, task.ID)
-		_ = bh.store.UpdateSession(session)
+		bh.addPendingSelection(userID, sent.ID, task.ID)
 	}
 }
 
-func (bh *Handlers) handleBatchFormatSelection(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session, lang i18n.Lang, batchTask *types.Task, targetExt string) {
+func (bh *Handlers) handleBatchFormatSelection(ctx context.Context, b *bot.Bot, update *models.Update, userID int64, lang i18n.Lang, batchTask *types.Task, targetExt string) {
 	files := parseBatchFiles(batchTask.Options["batch_files"])
 	if len(files) < 2 {
 		_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackInvalidButtonData(lang))
@@ -1605,7 +1646,7 @@ func (bh *Handlers) handleBatchFormatSelection(ctx context.Context, b *bot.Bot, 
 	unlimited := false
 	remaining := 0
 	if totalCredits > 0 && bh.billing != nil {
-		r, u, err := bh.billing.Consume(session.UserID, totalCredits)
+		r, u, err := bh.billing.Consume(userID, totalCredits)
 		if err != nil {
 			if err == store.ErrInsufficientCredits {
 				_ = bh.answerCallbackAlert(ctx, b, update.CallbackQuery.ID, messages.CallbackInsufficientCredits(lang, r))
@@ -1618,9 +1659,14 @@ func (bh *Handlers) handleBatchFormatSelection(ctx context.Context, b *bot.Bot, 
 		remaining = r
 	}
 
+	chatID := getChatIDFromUpdate(update)
+	if chatID == 0 {
+		chatID = userID
+	}
+
 	for _, f := range files {
 		task := &types.Task{
-			SessionID:   session.ID,
+			UserID:      userID,
 			State:       types.StateProcessing,
 			FileID:      f.FileID,
 			FileName:    f.FileName,
@@ -1639,7 +1685,7 @@ func (bh *Handlers) handleBatchFormatSelection(ctx context.Context, b *bot.Bot, 
 			},
 		}
 		_ = bh.store.CreateTask(task)
-		bh.scheduler.EnqueueTask(task.ID, 0, 0, task.FileName, lang, unlimited)
+		bh.scheduler.EnqueueTask(task.ID, chatID, 0, task.FileName, lang, unlimited)
 	}
 
 	_ = bh.store.DeleteTask(batchTask.ID)
@@ -1661,16 +1707,16 @@ func (bh *Handlers) handleBatchFormatSelection(ctx context.Context, b *bot.Bot, 
 		}
 	}
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:    session.ChatID,
+		ChatID:    chatID,
 		Text:      text,
 		ParseMode: messages.ParseModeHTML,
 	})
 	_ = bh.answerCallback(ctx, b, update.CallbackQuery.ID, "")
 }
 
-func (bh *Handlers) HandleFile(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session) {
+func (bh *Handlers) HandleFile(ctx context.Context, b *bot.Bot, update *models.Update, userID int64) {
 	filesInfo, hasFiles := contextkeys.GetFilesInfo(ctx)
-	lang := langFromSessionOrCtx(ctx, session)
+	lang := bh.langFromUserOrCtx(ctx, userID)
 	if !hasFiles || filesInfo == nil || len(filesInfo.Files) == 0 {
 		b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    update.Message.Chat.ID,
@@ -1680,144 +1726,28 @@ func (bh *Handlers) HandleFile(ctx context.Context, b *bot.Bot, update *models.U
 		return
 	}
 
-	if session.Options == nil {
-		session.Options = map[string]interface{}{}
+	options, _ := bh.userState.GetUserOptions(userID)
+	if options == nil {
+		options = map[string]interface{}{}
 	}
 
-	if st, ok := session.Options["merge_state"].(string); ok && strings.TrimSpace(st) == "waiting" {
-		bh.handleMergePDFFile(ctx, b, session, lang, filesInfo.Files)
+	if st, ok := options["merge_state"].(string); ok && strings.TrimSpace(st) == "waiting" {
+		bh.handleMergePDFFile(ctx, b, userID, lang, filesInfo.Files)
 		return
 	}
 
-	if st, ok := session.Options["mb_state"].(string); ok && strings.TrimSpace(st) == "collect" {
-		bh.manualBatchAddFiles(ctx, b, session, lang, filesInfo.Files)
+	if st, ok := options["mb_state"].(string); ok && strings.TrimSpace(st) == "collect" {
+		bh.manualBatchAddFiles(ctx, b, userID, lang, filesInfo.Files)
 		return
 	}
 
 	for _, fi := range filesInfo.Files {
 		f := formats.BatchFile{FileID: fi.FileID, FileName: fi.FileName, FileSize: fi.FileSize}
-		bh.createAndAskFormatForSingleFile(ctx, b, session, lang, f)
+		bh.createAndAskFormatForSingleFile(ctx, b, userID, lang, f)
 	}
 }
 
-func (bh *Handlers) appendToUserBatch(ctx context.Context, b *bot.Bot, collectKey string, chatID int64, session *types.Session, lang i18n.Lang, files []contextkeys.FileInfo) {
-	if session == nil || len(files) == 0 {
-		return
-	}
-	if session.Options == nil {
-		session.Options = map[string]interface{}{}
-	}
-
-	collectKey = strings.TrimSpace(collectKey)
-	if collectKey == "" {
-		collectKey = session.ID
-	}
-
-	taskID := ""
-	bh.batchMu.Lock()
-	if v, ok := bh.batchTaskID[collectKey]; ok {
-		taskID = strings.TrimSpace(v)
-	}
-	bh.batchMu.Unlock()
-	if taskID == "" && collectKey == session.ID {
-		if v, ok := session.Options["collect_task_id"]; ok {
-			if s, ok := v.(string); ok {
-				taskID = strings.TrimSpace(s)
-			}
-		}
-	}
-
-	var task *types.Task
-	if taskID != "" {
-		t, err := bh.store.GetTask(taskID)
-		if err == nil && t != nil && t.SessionID == session.ID && t.Options != nil {
-			task = t
-		} else {
-			taskID = ""
-		}
-	}
-
-	if task == nil {
-		tasks, err := bh.store.GetSessionTasks(session.ID)
-		if err == nil {
-			for i := len(tasks) - 1; i >= 0; i-- {
-				t := tasks[i]
-				if t == nil || t.Options == nil {
-					continue
-				}
-				if v, ok := t.Options["collect_key"]; ok {
-					if s, ok := v.(string); ok && strings.TrimSpace(s) != "" && strings.TrimSpace(s) != collectKey {
-						continue
-					}
-				}
-				if v, ok := t.Options["collecting"]; ok {
-					if bv, ok := v.(bool); ok && bv && t.State == types.StateChooseExt {
-						task = t
-						taskID = t.ID
-						if collectKey == session.ID {
-							session.Options["collect_task_id"] = taskID
-							_ = bh.store.UpdateSession(session)
-						}
-						break
-					}
-				}
-			}
-		}
-	}
-
-	if task == nil {
-		task = &types.Task{
-			SessionID:   session.ID,
-			State:       types.StateChooseExt,
-			FileID:      "",
-			FileName:    "batch",
-			OriginalExt: "",
-			TargetExt:   "",
-			Options: map[string]interface{}{
-				"lang":        string(lang),
-				"collecting":  true,
-				"collect_key": collectKey,
-				"batch_files": []interface{}{},
-			},
-		}
-		_ = bh.store.CreateTask(task)
-		taskID = task.ID
-		bh.batchMu.Lock()
-		bh.batchTaskID[collectKey] = taskID
-		bh.batchMu.Unlock()
-		if collectKey == session.ID {
-			session.Options["collect_task_id"] = taskID
-			_ = bh.store.UpdateSession(session)
-		}
-	}
-
-	list := []interface{}{}
-	if v, ok := task.Options["batch_files"]; ok {
-		if arr, ok := v.([]interface{}); ok {
-			list = arr
-		}
-	}
-	now := time.Now().UnixNano()
-	for _, fi := range files {
-		fileName := strings.TrimSpace(fi.FileName)
-		if strings.EqualFold(fileName, "photo.jpg") {
-			fileName = fmt.Sprintf("photo_%d.jpg", time.Now().UnixNano())
-		}
-		list = append(list, map[string]interface{}{
-			"file_id":   fi.FileID,
-			"file_name": fileName,
-			"file_size": fi.FileSize,
-		})
-	}
-	task.Options["batch_files"] = list
-	task.Options["collect_last"] = now
-	task.Options["lang"] = string(lang)
-	_ = bh.store.UpdateTask(task)
-
-	bh.resetBatchTimer(b, collectKey, session.ID, task.ID, len(list))
-}
-
-func (bh *Handlers) resetBatchTimer(b *bot.Bot, collectKey string, sessionID string, collectorTaskID string, batchCount int) {
+func (bh *Handlers) resetBatchTimer(b *bot.Bot, collectKey string, userID int64, collectorTaskID string, batchCount int) {
 	window := 900 * time.Millisecond
 	if strings.Contains(collectKey, ":mg:") {
 		if batchCount <= 1 {
@@ -1842,18 +1772,17 @@ func (bh *Handlers) resetBatchTimer(b *bot.Bot, collectKey string, sessionID str
 		if strings.TrimSpace(current) != strings.TrimSpace(collectorTaskID) {
 			return
 		}
-		bh.finalizeUserBatch(b, collectKey, sessionID, collectorTaskID)
+		bh.finalizeUserBatch(b, collectKey, userID, collectorTaskID)
 	})
 	bh.batchMu.Unlock()
 }
 
-func (bh *Handlers) finalizeUserBatch(b *bot.Bot, collectKey string, sessionID string, collectorTaskID string) {
+func (bh *Handlers) finalizeUserBatch(b *bot.Bot, collectKey string, userID int64, collectorTaskID string) {
 	task, err := bh.store.GetTask(collectorTaskID)
 	if err != nil || task == nil || task.Options == nil {
 		return
 	}
-	session, err := bh.store.GetSession(sessionID)
-	if err != nil || session == nil {
+	if task.UserID != userID {
 		return
 	}
 
@@ -1864,13 +1793,11 @@ func (bh *Handlers) finalizeUserBatch(b *bot.Bot, collectKey string, sessionID s
 		}
 	}
 
-	chatID := session.ChatID
+	chatID := userID // Для личных чатов используем userID как chatID
 
 	files := parseBatchFiles(task.Options["batch_files"])
 	if len(files) == 0 {
 		_ = bh.store.DeleteTask(task.ID)
-		delete(session.Options, "collect_task_id")
-		_ = bh.store.UpdateSession(session)
 		return
 	}
 
@@ -1894,10 +1821,6 @@ func (bh *Handlers) finalizeUserBatch(b *bot.Bot, collectKey string, sessionID s
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if collectKey == session.ID {
-		delete(session.Options, "collect_task_id")
-		_ = bh.store.UpdateSession(session)
-	}
 	_ = bh.store.DeleteTask(task.ID)
 
 	bh.batchMu.Lock()
@@ -1911,12 +1834,12 @@ func (bh *Handlers) finalizeUserBatch(b *bot.Bot, collectKey string, sessionID s
 	unlimited := false
 	remaining := 0
 	if bh.billing != nil {
-		u, err := bh.billing.IsUnlimited(session.UserID)
+		u, err := bh.billing.IsUnlimited(userID)
 		if err == nil {
 			unlimited = u
 		}
 		if !unlimited {
-			r, err := bh.billing.GetOrResetBalance(session.UserID)
+			r, err := bh.billing.GetOrResetBalance(userID)
 			if err == nil {
 				remaining = r
 			}
@@ -1929,7 +1852,7 @@ func (bh *Handlers) finalizeUserBatch(b *bot.Bot, collectKey string, sessionID s
 			targets := formats.GetTargetFormatsForSourceExt(extKey)
 			if len(targets) > 0 {
 				bt := &types.Task{
-					SessionID:   session.ID,
+					UserID:      userID,
 					State:       types.StateChooseExt,
 					FileID:      groupFiles[0].FileID,
 					FileName:    fmt.Sprintf("%d files.%s", len(groupFiles), extKey),
@@ -1981,7 +1904,7 @@ func (bh *Handlers) finalizeUserBatch(b *bot.Bot, collectKey string, sessionID s
 		}
 
 		for _, f := range groupFiles {
-			bh.createAndAskFormatForSingleFile(ctx, b, session, lang, f)
+			bh.createAndAskFormatForSingleFile(ctx, b, userID, lang, f)
 		}
 	}
 }
@@ -2017,11 +1940,11 @@ func (bh *Handlers) buildInlineKeyboard(buttons []formats.FormatButton) models.I
 	}
 }
 
-func (bh *Handlers) HandleText(ctx context.Context, b *bot.Bot, update *models.Update, session *types.Session) {
+func (bh *Handlers) HandleText(ctx context.Context, b *bot.Bot, update *models.Update, userID int64) {
 	if update == nil || update.Message == nil {
 		return
 	}
-	lang := langFromSessionOrCtx(ctx, session)
+	lang := bh.langFromUserOrCtx(ctx, userID)
 	chatID := update.Message.Chat.ID
 	text := strings.TrimSpace(update.Message.Text)
 	if text == "" {
@@ -2033,8 +1956,9 @@ func (bh *Handlers) HandleText(ctx context.Context, b *bot.Bot, update *models.U
 		return
 	}
 
-	if session != nil && session.Options != nil {
-		if st, ok := session.Options["mb_state"].(string); ok && strings.TrimSpace(st) == "await_count" {
+	options, _ := bh.userState.GetUserOptions(userID)
+	if options != nil {
+		if st, ok := options["mb_state"].(string); ok && strings.TrimSpace(st) == "await_count" {
 			n, err := strconv.Atoi(strings.TrimSpace(text))
 			if err != nil || n <= 0 || n > 100 {
 				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
@@ -2044,10 +1968,10 @@ func (bh *Handlers) HandleText(ctx context.Context, b *bot.Bot, update *models.U
 				})
 				return
 			}
-			session.Options["mb_state"] = "collect"
-			session.Options["mb_expected"] = n
-			session.Options["mb_files"] = []interface{}{}
-			_ = bh.store.UpdateSession(session)
+			options["mb_state"] = "collect"
+			options["mb_expected"] = n
+			options["mb_files"] = []interface{}{}
+			_ = bh.userState.SetUserOptions(userID, options)
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID:    chatID,
 				Text:      messages.BatchCountAccepted(lang, n),
@@ -2117,7 +2041,7 @@ func (bh *Handlers) HandleText(ctx context.Context, b *bot.Bot, update *models.U
 	if msg.Document != nil {
 		fileSize = int64(msg.Document.FileSize)
 	}
-	task, err := bh.store.SetProcessingFile(session.ID, fileID, fileName, fileSize)
+	task, err := bh.store.SetProcessingFile(userID, fileID, fileName, fileSize)
 	if err != nil {
 		log.Printf("Error creating task for text file: %v", err)
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
@@ -2138,11 +2062,11 @@ func (bh *Handlers) HandleText(ctx context.Context, b *bot.Bot, update *models.U
 	keyboard := bh.buildInlineKeyboard(buttons)
 	textOut := messages.TextReceivedChooseFormat(lang)
 	if bh.billing != nil {
-		unlimited, err := bh.billing.IsUnlimited(session.UserID)
+		unlimited, err := bh.billing.IsUnlimited(userID)
 		if err == nil && unlimited {
 			textOut = textOut + "\n\n" + messages.PlanUnlimitedLine(lang)
 		} else if err == nil {
-			rem, err := bh.billing.GetOrResetBalance(session.UserID)
+			rem, err := bh.billing.GetOrResetBalance(userID)
 			if err == nil {
 				textOut = textOut + "\n\n" + messages.CreditsRemainingLine(lang, rem)
 				if rem <= 0 {
@@ -2158,37 +2082,36 @@ func (bh *Handlers) HandleText(ctx context.Context, b *bot.Bot, update *models.U
 		ReplyMarkup: keyboard,
 	})
 	if sent != nil {
-		bh.addPendingSelection(session, sent.ID, task.ID)
-		_ = bh.store.UpdateSession(session)
+		bh.addPendingSelection(userID, sent.ID, task.ID)
 	}
 }
 
-func (bh *Handlers) startManualBatchTimer(b *bot.Bot, sessionID string) {
-	key := "mb:" + strings.TrimSpace(sessionID)
+func (bh *Handlers) startManualBatchTimer(b *bot.Bot, userID int64) {
+	key := fmt.Sprintf("mb:%d", userID)
 	bh.batchMu.Lock()
 	if t, ok := bh.batchTimers[key]; ok && t != nil {
 		t.Stop()
 	}
 	bh.batchTimers[key] = time.AfterFunc(10*time.Second, func() {
-		bh.manualBatchFinalize(b, sessionID, true)
+		bh.manualBatchFinalize(b, userID, true)
 	})
 	bh.batchMu.Unlock()
 }
 
-func (bh *Handlers) resetManualBatchTimer(b *bot.Bot, sessionID string) {
-	key := "mb:" + strings.TrimSpace(sessionID)
+func (bh *Handlers) resetManualBatchTimer(b *bot.Bot, userID int64) {
+	key := fmt.Sprintf("mb:%d", userID)
 	bh.batchMu.Lock()
 	if t, ok := bh.batchTimers[key]; ok && t != nil {
 		t.Stop()
 	}
 	bh.batchTimers[key] = time.AfterFunc(10*time.Second, func() {
-		bh.manualBatchFinalize(b, sessionID, true)
+		bh.manualBatchFinalize(b, userID, true)
 	})
 	bh.batchMu.Unlock()
 }
 
-func (bh *Handlers) stopManualBatchTimer(sessionID string) {
-	key := "mb:" + strings.TrimSpace(sessionID)
+func (bh *Handlers) stopManualBatchTimer(userID int64) {
+	key := fmt.Sprintf("mb:%d", userID)
 	bh.batchMu.Lock()
 	if t, ok := bh.batchTimers[key]; ok && t != nil {
 		t.Stop()
@@ -2197,12 +2120,16 @@ func (bh *Handlers) stopManualBatchTimer(sessionID string) {
 	bh.batchMu.Unlock()
 }
 
-func (bh *Handlers) manualBatchAddFiles(ctx context.Context, b *bot.Bot, session *types.Session, lang i18n.Lang, files []contextkeys.FileInfo) {
-	if session == nil || session.Options == nil || len(files) == 0 {
+func (bh *Handlers) manualBatchAddFiles(ctx context.Context, b *bot.Bot, userID int64, lang i18n.Lang, files []contextkeys.FileInfo) {
+	if len(files) == 0 {
 		return
 	}
+	options, _ := bh.userState.GetUserOptions(userID)
+	if options == nil {
+		options = map[string]interface{}{}
+	}
 	expected := 0
-	if v, ok := session.Options["mb_expected"]; ok {
+	if v, ok := options["mb_expected"]; ok {
 		switch t := v.(type) {
 		case int:
 			expected = t
@@ -2213,7 +2140,7 @@ func (bh *Handlers) manualBatchAddFiles(ctx context.Context, b *bot.Bot, session
 		}
 	}
 	list := []interface{}{}
-	if v, ok := session.Options["mb_files"]; ok {
+	if v, ok := options["mb_files"]; ok {
 		if arr, ok := v.([]interface{}); ok {
 			list = arr
 		}
@@ -2227,28 +2154,33 @@ func (bh *Handlers) manualBatchAddFiles(ctx context.Context, b *bot.Bot, session
 			"file_size": fi.FileSize,
 		})
 	}
-	session.Options["mb_files"] = list
-	_ = bh.store.UpdateSession(session)
+	options["mb_files"] = list
+	_ = bh.userState.SetUserOptions(userID, options)
 
 	if expected > 0 && len(list) >= expected {
-		bh.stopManualBatchTimer(session.ID)
-		bh.manualBatchFinalize(b, session.ID, false)
+		bh.stopManualBatchTimer(userID)
+		bh.manualBatchFinalize(b, userID, false)
 	} else if filesBefore == 0 && len(list) > 0 {
-		bh.startManualBatchTimer(b, session.ID)
+		bh.startManualBatchTimer(b, userID)
 	} else if len(list) > filesBefore {
-		bh.resetManualBatchTimer(b, session.ID)
+		bh.resetManualBatchTimer(b, userID)
 	}
 }
 
-func (bh *Handlers) manualBatchFinalize(b *bot.Bot, sessionID string, timedOut bool) {
-	bh.stopManualBatchTimer(sessionID)
-	session, err := bh.store.GetSession(sessionID)
-	if err != nil || session == nil || session.Options == nil {
+func (bh *Handlers) manualBatchFinalize(b *bot.Bot, userID int64, timedOut bool) {
+	bh.stopManualBatchTimer(userID)
+	options, _ := bh.userState.GetUserOptions(userID)
+	if options == nil {
 		return
 	}
-	lang := langFromSessionOrCtx(context.Background(), session)
+	lang := i18n.EN
+	if v, ok := options["lang"]; ok {
+		if s, ok := v.(string); ok {
+			lang = i18n.Parse(s)
+		}
+	}
 	expected := 0
-	if v, ok := session.Options["mb_expected"]; ok {
+	if v, ok := options["mb_expected"]; ok {
 		switch t := v.(type) {
 		case int:
 			expected = t
@@ -2258,19 +2190,20 @@ func (bh *Handlers) manualBatchFinalize(b *bot.Bot, sessionID string, timedOut b
 			expected = int(t)
 		}
 	}
-	files := parseBatchFiles(session.Options["mb_files"])
+	files := parseBatchFiles(options["mb_files"])
 
-	delete(session.Options, "mb_state")
-	delete(session.Options, "mb_expected")
-	delete(session.Options, "mb_files")
-	_ = bh.store.UpdateSession(session)
+	delete(options, "mb_state")
+	delete(options, "mb_expected")
+	delete(options, "mb_files")
+	_ = bh.userState.SetUserOptions(userID, options)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	chatID := userID // Для личных чатов используем userID как chatID
 	if timedOut && expected > 0 {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    session.ChatID,
+			ChatID:    chatID,
 			Text:      messages.BatchTimeout(lang, len(files), expected),
 			ParseMode: messages.ParseModeHTML,
 		})
@@ -2300,12 +2233,12 @@ func (bh *Handlers) manualBatchFinalize(b *bot.Bot, sessionID string, timedOut b
 	unlimited := false
 	remaining := 0
 	if bh.billing != nil {
-		u, err := bh.billing.IsUnlimited(session.UserID)
+		u, err := bh.billing.IsUnlimited(userID)
 		if err == nil {
 			unlimited = u
 		}
 		if !unlimited {
-			r, err := bh.billing.GetOrResetBalance(session.UserID)
+			r, err := bh.billing.GetOrResetBalance(userID)
 			if err == nil {
 				remaining = r
 			}
@@ -2318,7 +2251,7 @@ func (bh *Handlers) manualBatchFinalize(b *bot.Bot, sessionID string, timedOut b
 			targets := formats.GetTargetFormatsForSourceExt(extKey)
 			if len(targets) > 0 {
 				bt := &types.Task{
-					SessionID:   session.ID,
+					UserID:      userID,
 					State:       types.StateChooseExt,
 					FileID:      groupFiles[0].FileID,
 					FileName:    fmt.Sprintf("%d files.%s", len(groupFiles), extKey),
@@ -2358,7 +2291,7 @@ func (bh *Handlers) manualBatchFinalize(b *bot.Bot, sessionID string, timedOut b
 					}
 				}
 				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-					ChatID:    session.ChatID,
+					ChatID:    chatID,
 					Text:      text,
 					ParseMode: messages.ParseModeHTML,
 					ReplyMarkup: &models.InlineKeyboardMarkup{
@@ -2369,17 +2302,18 @@ func (bh *Handlers) manualBatchFinalize(b *bot.Bot, sessionID string, timedOut b
 			}
 		}
 		for _, f := range groupFiles {
-			bh.createAndAskFormatForSingleFile(ctx, b, session, lang, f)
+			bh.createAndAskFormatForSingleFile(ctx, b, userID, lang, f)
 		}
 	}
 }
 
-func (bh *Handlers) addPendingSelection(session *types.Session, messageID int, taskID string) {
-	if session == nil || messageID == 0 || strings.TrimSpace(taskID) == "" {
+func (bh *Handlers) addPendingSelection(userID int64, messageID int, taskID string) {
+	if messageID == 0 || strings.TrimSpace(taskID) == "" {
 		return
 	}
-	next := make([]types.PendingSelection, 0, len(session.Pending)+1)
-	for _, p := range session.Pending {
+	pending, _ := bh.userState.GetUserPending(userID)
+	next := make([]types.PendingSelection, 0, len(pending)+1)
+	for _, p := range pending {
 		if p.MessageID == 0 || strings.TrimSpace(p.TaskID) == "" {
 			continue
 		}
@@ -2392,7 +2326,7 @@ func (bh *Handlers) addPendingSelection(session *types.Session, messageID int, t
 	if len(next) > 25 {
 		next = next[len(next)-25:]
 	}
-	session.Pending = next
+	_ = bh.userState.SetUserPending(userID, next)
 }
 
 func (bh *Handlers) downloadFile(ctx context.Context, b *bot.Bot, fileID, tempDir, fileName string) (string, error) {
@@ -2436,11 +2370,11 @@ func (bh *Handlers) downloadFile(ctx context.Context, b *bot.Bot, fileID, tempDi
 	return destPath, nil
 }
 
-func (bh *Handlers) processMergePDF(b *bot.Bot, session *types.Session, lang i18n.Lang, fileInfos []contextkeys.FileInfo) {
+func (bh *Handlers) processMergePDF(b *bot.Bot, userID int64, chatID int64, lang i18n.Lang, fileInfos []contextkeys.FileInfo) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	log.Printf("Starting PDF merge for user %d with %d files", session.UserID, len(fileInfos))
+	log.Printf("Starting PDF merge for user %d with %d files", userID, len(fileInfos))
 
 	if len(fileInfos) < 2 {
 		log.Printf("Not enough files to merge: %d", len(fileInfos))
@@ -2462,7 +2396,7 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, session *types.Session, lang i18
 		if err != nil {
 			log.Printf("Error downloading file %s: %v", fi.FileName, err)
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID:    session.ChatID,
+				ChatID:    chatID,
 				Text:      messages.MergePDFError(lang),
 				ParseMode: messages.ParseModeHTML,
 			})
@@ -2483,7 +2417,7 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, session *types.Session, lang i18
 		if checkOutput2, checkErr2 := checkCmd2.CombinedOutput(); checkErr2 != nil {
 			log.Printf("pdftk also not found: %v, output: %s", checkErr2, string(checkOutput2))
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID:    session.ChatID,
+				ChatID:    chatID,
 				Text:      messages.MergePDFError(lang),
 				ParseMode: messages.ParseModeHTML,
 			})
@@ -2498,7 +2432,7 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, session *types.Session, lang i18
 		if os.IsNotExist(err) {
 			log.Printf("PDF file %d does not exist: %s", i, path)
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID:    session.ChatID,
+				ChatID:    chatID,
 				Text:      messages.MergePDFError(lang),
 				ParseMode: messages.ParseModeHTML,
 			})
@@ -2542,7 +2476,7 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, session *types.Session, lang i18
 	if err != nil {
 		log.Printf("Error merging PDFs with %s: %v", toolName, err)
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    session.ChatID,
+			ChatID:    chatID,
 			Text:      messages.MergePDFError(lang),
 			ParseMode: messages.ParseModeHTML,
 		})
@@ -2553,7 +2487,7 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, session *types.Session, lang i18
 	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
 		log.Printf("Output file does not exist: %s", outputPath)
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    session.ChatID,
+			ChatID:    chatID,
 			Text:      messages.MergePDFError(lang),
 			ParseMode: messages.ParseModeHTML,
 		})
@@ -2568,7 +2502,7 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, session *types.Session, lang i18
 	if err != nil {
 		log.Printf("Error opening merged PDF: %v", err)
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID:    session.ChatID,
+			ChatID:    chatID,
 			Text:      messages.MergePDFError(lang),
 			ParseMode: messages.ParseModeHTML,
 		})
@@ -2584,7 +2518,7 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, session *types.Session, lang i18
 	log.Printf("Merged PDF size: %d bytes", stat.Size())
 
 	_, err = b.SendDocument(ctx, &bot.SendDocumentParams{
-		ChatID: session.ChatID,
+		ChatID: chatID,
 		Document: &models.InputFileUpload{
 			Filename: "merged.pdf",
 			Data:     file,
@@ -2596,6 +2530,6 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, session *types.Session, lang i18
 	if err != nil {
 		log.Printf("Error sending merged PDF: %v", err)
 	} else {
-		log.Printf("Successfully sent merged PDF to user %d", session.UserID)
+		log.Printf("Successfully sent merged PDF to user %d", userID)
 	}
 }

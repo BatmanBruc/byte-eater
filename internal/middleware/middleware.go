@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"context"
-	"log"
 	"strings"
 
 	"github.com/go-telegram/bot"
@@ -10,18 +9,15 @@ import (
 
 	"github.com/BatmanBruc/bat-bot-convetor/internal/contextkeys"
 	"github.com/BatmanBruc/bat-bot-convetor/internal/i18n"
-	"github.com/BatmanBruc/bat-bot-convetor/internal/messages"
 	"github.com/BatmanBruc/bat-bot-convetor/types"
 )
 
 type Middlewares struct {
-	store     types.TaskStore
 	userStore types.UserStore
 }
 
-func NewMessageAnalyzer(store types.TaskStore, userStore types.UserStore) *Middlewares {
+func NewMessageAnalyzer(userStore types.UserStore) *Middlewares {
 	return &Middlewares{
-		store:     store,
 		userStore: userStore,
 	}
 }
@@ -29,13 +25,12 @@ func NewMessageAnalyzer(store types.TaskStore, userStore types.UserStore) *Middl
 func (m *Middlewares) CheckTaskMiddleWare(next bot.HandlerFunc) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		var (
-			userID int64
-			chatID int64
+			userID    int64
+			chatID    int64
+			username  string
+			firstName string
+			lastName  string
 		)
-
-		var username string
-		var firstName string
-		var lastName string
 		langCode := ""
 		switch {
 		case update.Message != nil && update.Message.From != nil:
@@ -82,33 +77,11 @@ func (m *Middlewares) CheckTaskMiddleWare(next bot.HandlerFunc) bot.HandlerFunc 
 			})
 		}
 
-		session, err := m.store.GetUserSession(userID)
-
-		if err != nil {
-			session = &types.Session{
-				UserID: userID,
-				ChatID: chatID,
-				State:  types.StateStart,
-			}
-			if session.ChatID == 0 {
-				session.ChatID = userID
-			}
-			err = m.store.CreateSession(session)
-			if err != nil {
-				log.Printf("Error creating session: %v", err)
-				b.SendMessage(ctx, &bot.SendMessageParams{
-					ChatID:    session.ChatID,
-					Text:      messages.ErrorDefault(lang),
-					ParseMode: messages.ParseModeHTML,
-				})
-				return
-			}
-		}
 		if chatID == 0 {
-			chatID = session.ChatID
+			chatID = userID
 		}
 
-		ctx = contextkeys.WithSessionID(ctx, session.ID)
+		ctx = contextkeys.WithUserID(ctx, userID)
 		next(ctx, b, update)
 	}
 }

@@ -4,7 +4,7 @@ import "context"
 
 type messageTypeKey struct{}
 type filesInfoKey struct{}
-type sessionIDKey struct{}
+type userIDKey struct{}
 type callbackDataKey struct{}
 type langKey struct{}
 
@@ -95,16 +95,16 @@ func GetFileInfo(ctx context.Context, index int) (FileInfo, bool) {
 	return info.Files[index], true
 }
 
-func WithSessionID(ctx context.Context, sessionID string) context.Context {
-	return context.WithValue(ctx, sessionIDKey{}, sessionID)
+func WithUserID(ctx context.Context, userID int64) context.Context {
+	return context.WithValue(ctx, userIDKey{}, userID)
 }
 
-func GetSessionID(ctx context.Context) (string, bool) {
-	v := ctx.Value(sessionIDKey{})
+func GetUserID(ctx context.Context) (int64, bool) {
+	v := ctx.Value(userIDKey{})
 	if v == nil {
-		return "", false
+		return 0, false
 	}
-	return v.(string), true
+	return v.(int64), true
 }
 
 func WithCallbackData(ctx context.Context, data string) context.Context {
