@@ -2489,7 +2489,7 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, userID int64, chatID int64, lang
 	var cmd *exec.Cmd
 	var toolName string
 
-	// Предпочитаем pdftk (в Dockerfile он установлен), т.к. qpdf легко сломать неправильными аргументами.
+	// Prefer pdftk (stable for concatenation). If not installed, fallback to qpdf.
 	if _, err := exec.LookPath("pdftk"); err == nil {
 		args := append(pdfPaths, "cat", "output", outputPath)
 		cmd = exec.Command("pdftk", args...)

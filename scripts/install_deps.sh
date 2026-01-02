@@ -19,17 +19,20 @@ fi
 case "$pm" in
   apt)
     sudo apt-get update -y
-    sudo apt-get install -y --no-install-recommends ca-certificates ffmpeg imagemagick libreoffice calibre poppler-utils redis-server postgresql
+    # PDF merge tools:
+    # - pdftk-java provides "pdftk" on Ubuntu 22.04 (pdftk package is transitional)
+    # - qpdf is a reliable fallback
+    sudo apt-get install -y --no-install-recommends ca-certificates ffmpeg imagemagick libreoffice calibre poppler-utils pdftk-java qpdf redis-server postgresql
     ;;
   dnf)
-    sudo dnf install -y ca-certificates ffmpeg ImageMagick libreoffice calibre poppler-utils redis postgresql-server
+    sudo dnf install -y ca-certificates ffmpeg ImageMagick libreoffice calibre poppler-utils qpdf java-17-openjdk-headless redis postgresql-server
     ;;
   pacman)
-    sudo pacman -Sy --noconfirm --needed ca-certificates ffmpeg imagemagick libreoffice-fresh calibre poppler redis postgresql
+    sudo pacman -Sy --noconfirm --needed ca-certificates ffmpeg imagemagick libreoffice-fresh calibre poppler qpdf pdftk redis postgresql
     ;;
   brew)
     brew update
-    brew install ffmpeg imagemagick libreoffice calibre poppler redis postgresql@16
+    brew install ffmpeg imagemagick libreoffice calibre poppler qpdf pdftk-java redis postgresql@16
     ;;
 esac
 
