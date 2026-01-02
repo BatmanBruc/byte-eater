@@ -2382,7 +2382,11 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, userID int64, chatID int64, lang
 	}
 
 	// Скачать все файлы
-	tempDir := "/app/temp"
+	tempDir := strings.TrimSpace(os.Getenv("TMPDIR"))
+	if tempDir == "" {
+		tempDir = os.TempDir()
+	}
+	_ = os.MkdirAll(tempDir, 0755)
 	pdfPaths := []string{}
 	defer func() {
 		for _, path := range pdfPaths {
@@ -2407,24 +2411,6 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, userID int64, chatID int64, lang
 	}
 
 	log.Printf("Downloaded %d files, starting merge", len(pdfPaths))
-
-	// Проверить что qpdf доступен (предпочитаем qpdf вместо pdftk)
-	checkCmd := exec.Command("which", "qpdf")
-	if checkOutput, checkErr := checkCmd.CombinedOutput(); checkErr != nil {
-		log.Printf("qpdf not found, trying pdftk: %v, output: %s", checkErr, string(checkOutput))
-		// Попробовать pdftk как fallback
-		checkCmd2 := exec.Command("which", "pdftk")
-		if checkOutput2, checkErr2 := checkCmd2.CombinedOutput(); checkErr2 != nil {
-			log.Printf("pdftk also not found: %v, output: %s", checkErr2, string(checkOutput2))
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID:    chatID,
-				Text:      messages.MergePDFError(lang),
-				ParseMode: messages.ParseModeHTML,
-			})
-			return
-		}
-		log.Printf("Using pdftk as fallback")
-	}
 
 	// Проверить что файлы существуют и имеют правильный размер
 	for i, path := range pdfPaths {
@@ -2452,23 +2438,31 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, userID int64, chatID int64, lang
 	var cmd *exec.Cmd
 	var toolName string
 
-	// Проверить доступность qpdf
-	if qpdfCheck := exec.Command("which", "qpdf"); qpdfCheck.Run() == nil {
-		// Использовать qpdf: qpdf --empty --pages file1.pdf file2.pdf -- output.pdf
-		args := []string{"--empty"}
+	// Предпочитаем pdftk (в Dockerfile он установлен), т.к. qpdf легко сломать неправильными аргументами.
+	if _, err := exec.LookPath("pdftk"); err == nil {
+		args := append(pdfPaths, "cat", "output", outputPath)
+		cmd = exec.Command("pdftk", args...)
+		toolName = "pdftk"
+		log.Printf("Using pdftk with args: %v", args)
+	} else if _, err := exec.LookPath("qpdf"); err == nil {
+		// Корректный синтаксис qpdf:
+		// qpdf --empty --pages file1.pdf 1-z file2.pdf 1-z -- output.pdf
+		args := []string{"--empty", "--pages"}
 		for _, path := range pdfPaths {
-			args = append(args, "--pages", path)
+			args = append(args, path, "1-z")
 		}
 		args = append(args, "--", outputPath)
 		cmd = exec.Command("qpdf", args...)
 		toolName = "qpdf"
 		log.Printf("Using qpdf with args: %v", args)
 	} else {
-		// Использовать pdftk как fallback: pdftk file1.pdf file2.pdf cat output output.pdf
-		args := append(pdfPaths, "cat", "output", outputPath)
-		cmd = exec.Command("pdftk", args...)
-		toolName = "pdftk"
-		log.Printf("Using pdftk with args: %v", args)
+		log.Printf("Neither pdftk nor qpdf is available to merge PDFs")
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
+			Text:      messages.MergePDFError(lang),
+			ParseMode: messages.ParseModeHTML,
+		})
+		return
 	}
 
 	output, err := cmd.CombinedOutput()
