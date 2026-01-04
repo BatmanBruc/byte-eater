@@ -28,5 +28,3 @@ func Parse(s string) Lang {
 		return EN
 	}
 }
-
-

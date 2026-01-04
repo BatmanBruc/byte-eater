@@ -37,8 +37,6 @@ type Task struct {
 	ExpiresAt    time.Time              `json:"expires_at"`
 }
 
-// UserStateStore хранит пользовательское состояние вне конкретных тасок:
-// язык, режимы (merge/batch), временные списки и т.п.
 type UserStateStore interface {
 	GetUserOptions(userID int64) (map[string]interface{}, error)
 	SetUserOptions(userID int64, options map[string]interface{}) error

@@ -432,7 +432,6 @@ func hasVideoOptions(options map[string]interface{}) bool {
 	return false
 }
 
-
 func (c *DefaultConverter) convertDocument(ctx context.Context, inputPath, outputPath string, originalExt, targetExt string) error {
 	if (c.isOfficeFormat(originalExt) || originalExt == "odt" || originalExt == "rtf" || originalExt == "txt") &&
 		(c.isOfficeFormat(targetExt) || targetExt == "pdf" || targetExt == "rtf" || targetExt == "txt") {

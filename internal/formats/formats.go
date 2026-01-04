@@ -227,7 +227,7 @@ func GetButtonsForSourceExtWithCredits(sourceExt string, taskID string, fileSize
 }
 
 func formatButtonText(label string, credits int, heavy bool) string {
-	// Все операции стоят 1 кредит, не показываем стоимость
+
 	return strings.TrimSpace(label)
 }
 
@@ -596,10 +596,10 @@ func GetHelpMessage(lang i18n.Lang) string {
 	}
 
 	if lang == i18n.RU {
-	msg.WriteString("🧭 <b>Использование</b>\n")
+		msg.WriteString("🧭 <b>Использование</b>\n")
 		msg.WriteString("1) Отправьте файл/текст (также можно войсы и кружки)\n")
 		msg.WriteString("2) Выберите целевой формат в кнопках (список зависит от исходного формата)\n")
-	msg.WriteString("3) Дождитесь результата\n\n")
+		msg.WriteString("3) Дождитесь результата\n\n")
 		msg.WriteString("Примеры:\n")
 	} else {
 		msg.WriteString("🧭 <b>How to use</b>\n")

@@ -75,9 +75,6 @@ func main() {
 		log.Println("Warning: Using default bot token. Set BOT_TOKEN environment variable.")
 	}
 
-	// Important:
-	// - getUpdates is long-polling (needs Timeout > pollTimeout)
-	// - sendDocument can upload large files (needs a much larger Timeout)
 	httpClient := &http.Client{
 		Timeout: 10 * time.Minute,
 	}

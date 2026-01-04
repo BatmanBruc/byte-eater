@@ -249,14 +249,14 @@ func (s *Scheduler) worker(id int) {
 			continue
 		}
 
-			task, err := s.store.GetTask(taskID)
-			if err != nil {
-				log.Printf("Worker %d: error getting task %s: %v", id, taskID, err)
-				s.inFlightMu.Lock()
-				delete(s.inFlight, taskID)
-				s.inFlightMu.Unlock()
-				continue
-			}
+		task, err := s.store.GetTask(taskID)
+		if err != nil {
+			log.Printf("Worker %d: error getting task %s: %v", id, taskID, err)
+			s.inFlightMu.Lock()
+			delete(s.inFlight, taskID)
+			s.inFlightMu.Unlock()
+			continue
+		}
 
 		isHeavy := s.isHeavyTask(task)
 		if isHeavy {
@@ -282,29 +282,29 @@ func (s *Scheduler) worker(id int) {
 			}
 		}()
 
-			var entry *inFlightEntry
-			s.inFlightMu.RLock()
-			entry = s.inFlight[taskID]
-			s.inFlightMu.RUnlock()
-			if entry != nil && entry.chatID != 0 && entry.messageID != 0 {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				_, err := s.botClient.DeleteMessage(ctx, &bot.DeleteMessageParams{
-					ChatID:    entry.chatID,
-					MessageID: entry.messageID,
-				})
-				cancel()
-				if err != nil {
-					log.Printf("Failed to delete status message chat=%d msg=%d: %v", entry.chatID, entry.messageID, err)
-				}
+		var entry *inFlightEntry
+		s.inFlightMu.RLock()
+		entry = s.inFlight[taskID]
+		s.inFlightMu.RUnlock()
+		if entry != nil && entry.chatID != 0 && entry.messageID != 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_, err := s.botClient.DeleteMessage(ctx, &bot.DeleteMessageParams{
+				ChatID:    entry.chatID,
+				MessageID: entry.messageID,
+			})
+			cancel()
+			if err != nil {
+				log.Printf("Failed to delete status message chat=%d msg=%d: %v", entry.chatID, entry.messageID, err)
 			}
-
-			s.inFlightMu.Lock()
-			delete(s.inFlight, taskID)
-			s.inFlightMu.Unlock()
-
-			go s.decrementQueueAndUpdateMessages()
 		}
+
+		s.inFlightMu.Lock()
+		delete(s.inFlight, taskID)
+		s.inFlightMu.Unlock()
+
+		go s.decrementQueueAndUpdateMessages()
 	}
+}
 
 func (s *Scheduler) isHeavyTask(task *types.Task) bool {
 	if task == nil {
@@ -419,7 +419,6 @@ func (s *Scheduler) processTask(task *types.Task) error {
 			log.Printf("Error setting task error: %v", err)
 		}
 
-		// Используем UserID как ChatID для личных чатов
 		chatID := task.UserID
 		s.botClient.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    chatID,
@@ -431,7 +430,7 @@ func (s *Scheduler) processTask(task *types.Task) error {
 	}
 
 	caption := s.resultCaption(task, outName)
-	// Используем UserID как ChatID для личных чатов
+
 	chatID := task.UserID
 	msg, err := s.sendDocumentFromPath(ctx, chatID, resultPath, outName, caption)
 	if err != nil {

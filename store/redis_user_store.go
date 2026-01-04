@@ -7,8 +7,6 @@ import (
 	"github.com/BatmanBruc/bat-bot-convetor/types"
 )
 
-// RedisUserStore отвечает только за пользовательское состояние (user_options, user_pending),
-// не смешивая его с Task CRUD.
 type RedisUserStore struct {
 	client *RedisClient
 	ttl    time.Duration
@@ -26,7 +24,6 @@ func NewRedisUserStore(redisClient *RedisClient, ttlHours int) *RedisUserStore {
 	}
 }
 
-// GetUserOptions получает опции пользователя.
 func (s *RedisUserStore) GetUserOptions(userID int64) (map[string]interface{}, error) {
 	key := s.client.generateKey("user_options", fmt.Sprintf("%d", userID))
 	var options map[string]interface{}
@@ -39,13 +36,11 @@ func (s *RedisUserStore) GetUserOptions(userID int64) (map[string]interface{}, e
 	return options, nil
 }
 
-// SetUserOptions сохраняет опции пользователя.
 func (s *RedisUserStore) SetUserOptions(userID int64, options map[string]interface{}) error {
 	key := s.client.generateKey("user_options", fmt.Sprintf("%d", userID))
 	return s.client.Set(key, options, s.ttl)
 }
 
-// GetUserPending получает список ожидающих выбора формата файлов пользователя.
 func (s *RedisUserStore) GetUserPending(userID int64) ([]types.PendingSelection, error) {
 	key := s.client.generateKey("user_pending", fmt.Sprintf("%d", userID))
 	var pending []types.PendingSelection
@@ -58,10 +53,7 @@ func (s *RedisUserStore) GetUserPending(userID int64) ([]types.PendingSelection,
 	return pending, nil
 }
 
-// SetUserPending сохраняет список ожидающих выбора формата файлов пользователя.
 func (s *RedisUserStore) SetUserPending(userID int64, pending []types.PendingSelection) error {
 	key := s.client.generateKey("user_pending", fmt.Sprintf("%d", userID))
 	return s.client.Set(key, pending, s.ttl)
 }
-
-

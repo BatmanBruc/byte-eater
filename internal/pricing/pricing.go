@@ -52,8 +52,6 @@ func isOffice(ext string) bool {
 }
 
 func Credits(originalExt, targetExt string, fileSize int64) (credits int, heavy bool) {
-	// Все операции стоят 1 кредит, нет тяжелых операций
+
 	return 1, false
 }
-
-

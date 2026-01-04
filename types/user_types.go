@@ -22,14 +22,14 @@ type Subscription struct {
 }
 
 type Payment struct {
-	UserID                 int64
-	Provider               string
-	Currency               string
-	TotalAmount            int64
-	InvoicePayload         string
-	TelegramPaymentCharge  string
-	ProviderPaymentCharge  string
-	CreatedAt              time.Time
+	UserID                int64
+	Provider              string
+	Currency              string
+	TotalAmount           int64
+	InvoicePayload        string
+	TelegramPaymentCharge string
+	ProviderPaymentCharge string
+	CreatedAt             time.Time
 }
 
 type UserStore interface {

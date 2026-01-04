@@ -265,5 +265,3 @@ func getFileExtension(filename string) string {
 	}
 	return ""
 }
-
-

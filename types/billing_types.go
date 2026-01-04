@@ -5,5 +5,3 @@ type BillingStore interface {
 	GetOrResetBalance(userID int64) (int, error)
 	Consume(userID int64, credits int) (remaining int, unlimited bool, err error)
 }
-
-

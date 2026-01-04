@@ -43,7 +43,6 @@ type Handlers struct {
 	batchTaskID map[string]string
 }
 
-// getUserIDFromUpdate извлекает UserID из update
 func getUserIDFromUpdate(update *models.Update) int64 {
 	if update == nil {
 		return 0
@@ -60,7 +59,6 @@ func getUserIDFromUpdate(update *models.Update) int64 {
 	return 0
 }
 
-// getChatIDFromUpdate извлекает ChatID из update
 func getChatIDFromUpdate(update *models.Update) int64 {
 	if update == nil {
 		return 0
@@ -79,7 +77,6 @@ func getChatIDFromUpdate(update *models.Update) int64 {
 	return 0
 }
 
-// langFromUserOrCtx получает язык из user options или контекста
 func (bh *Handlers) langFromUserOrCtx(ctx context.Context, userID int64) i18n.Lang {
 	if bh.userState != nil {
 		options, err := bh.userState.GetUserOptions(userID)
@@ -1008,7 +1005,7 @@ func (bh *Handlers) refreshPendingSelections(ctx context.Context, b *bot.Bot, us
 				}
 			}
 		}
-		// Получаем chatID из задачи (используем userID как chatID для личных чатов)
+
 		chatID := task.UserID
 		_, err = b.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:    chatID,
@@ -1196,7 +1193,7 @@ func (bh *Handlers) HandleCommand(ctx context.Context, b *bot.Bot, update *model
 					text = messages.CreditsRemainingLine(lang, rem)
 				}
 			} else {
-				text = "" // Для подписчиков не показывать ничего
+				text = ""
 			}
 		}
 		b.SendMessage(ctx, &bot.SendMessageParams{
@@ -1277,9 +1274,8 @@ func (bh *Handlers) handleMergePDFFile(ctx context.Context, b *bot.Bot, userID i
 		options = map[string]interface{}{}
 	}
 
-	chatID := userID // Для личных чатов используем userID как chatID
+	chatID := userID
 
-	// Проверить что файл - PDF
 	for _, fi := range files {
 		ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(fi.FileName), "."))
 		if ext != "pdf" {
@@ -1292,7 +1288,6 @@ func (bh *Handlers) handleMergePDFFile(ctx context.Context, b *bot.Bot, userID i
 		}
 	}
 
-	// Добавить файлы в список
 	list := []interface{}{}
 	if v, ok := options["merge_files"]; ok {
 		if arr, ok := v.([]interface{}); ok {
@@ -1309,7 +1304,6 @@ func (bh *Handlers) handleMergePDFFile(ctx context.Context, b *bot.Bot, userID i
 	}
 	options["merge_files"] = list
 
-	// Удалить предыдущее сообщение если есть (ДО обновления options)
 	var oldMsgID int
 	if msgID, ok := options["merge_msg_id"]; ok {
 		switch v := msgID.(type) {
@@ -1336,7 +1330,6 @@ func (bh *Handlers) handleMergePDFFile(ctx context.Context, b *bot.Bot, userID i
 
 	_ = bh.userState.SetUserOptions(userID, options)
 
-	// Получить список имен файлов
 	fileNames := []string{}
 	for _, item := range list {
 		if m, ok := item.(map[string]interface{}); ok {
@@ -1346,7 +1339,6 @@ func (bh *Handlers) handleMergePDFFile(ctx context.Context, b *bot.Bot, userID i
 		}
 	}
 
-	// Отправить новое сообщение со списком и кнопкой
 	sent, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
 		Text:      messages.MergePDFFilesList(lang, fileNames),
@@ -1401,7 +1393,6 @@ func (bh *Handlers) handleMergePDF(ctx context.Context, b *bot.Bot, update *mode
 		chatID = userID
 	}
 
-	// Удалить сообщение со списком файлов
 	if msgID, ok := options["merge_msg_id"]; ok {
 		if id, ok := msgID.(int); ok {
 			log.Printf("Deleting merge message after button click: %d", id)
@@ -1415,7 +1406,6 @@ func (bh *Handlers) handleMergePDF(ctx context.Context, b *bot.Bot, update *mode
 		}
 	}
 
-	// Получить fileInfos из options до очистки
 	fileInfos := []contextkeys.FileInfo{}
 	if v, ok := options["merge_files"]; ok {
 		if arr, ok := v.([]interface{}); ok {
@@ -1434,20 +1424,17 @@ func (bh *Handlers) handleMergePDF(ctx context.Context, b *bot.Bot, update *mode
 		}
 	}
 
-	// Очистить состояние
 	delete(options, "merge_state")
 	delete(options, "merge_files")
 	delete(options, "merge_msg_id")
 	_ = bh.userState.SetUserOptions(userID, options)
 
-	// Отправить уведомление о начале объединения
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
 		Text:      messages.MergePDFStarted(lang),
 		ParseMode: messages.ParseModeHTML,
 	})
 
-	// Запустить объединение
 	go bh.processMergePDF(b, userID, chatID, lang, fileInfos)
 }
 
@@ -1604,7 +1591,7 @@ func (bh *Handlers) createAndAskFormatForSingleFile(ctx context.Context, b *bot.
 	}
 	keyboard := bh.buildInlineKeyboard(buttons)
 	text := messages.FileReceivedChooseFormat(lang, fileName)
-	chatID := userID // Для личных чатов используем userID как chatID
+	chatID := userID
 	if bh.billing != nil {
 		unlimited, err := bh.billing.IsUnlimited(userID)
 		if err == nil && unlimited {
@@ -1795,7 +1782,7 @@ func (bh *Handlers) finalizeUserBatch(b *bot.Bot, collectKey string, userID int6
 		}
 	}
 
-	chatID := userID // Для личных чатов используем userID как chatID
+	chatID := userID
 
 	files := parseBatchFiles(task.Options["batch_files"])
 	if len(files) == 0 {
@@ -2202,7 +2189,7 @@ func (bh *Handlers) manualBatchFinalize(b *bot.Bot, userID int64, timedOut bool)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	chatID := userID // Для личных чатов используем userID как chatID
+	chatID := userID
 	if timedOut && expected > 0 {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:    chatID,
@@ -2376,8 +2363,7 @@ func (bh *Handlers) downloadFile(ctx context.Context, client *http.Client, b *bo
 }
 
 func (bh *Handlers) processMergePDF(b *bot.Bot, userID int64, chatID int64, lang i18n.Lang, fileInfos []contextkeys.FileInfo) {
-	// Merge can involve downloading several PDFs + running pdftk + uploading result back to Telegram.
-	// In slow networks (or Telegram slowdowns) upload can take multiple minutes.
+
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	defer cancel()
 
@@ -2388,7 +2374,6 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, userID int64, chatID int64, lang
 		return
 	}
 
-	// Скачать все файлы
 	tempDir := strings.TrimSpace(os.Getenv("TMPDIR"))
 	if tempDir == "" {
 		tempDir = os.TempDir()
@@ -2403,7 +2388,6 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, userID int64, chatID int64, lang
 		}
 	}()
 
-	// Dedicated HTTP client for file downloads (keep-alive + sane timeouts).
 	downloadClient := &http.Client{
 		Timeout: 10 * time.Minute,
 		Transport: &http.Transport{
@@ -2422,7 +2406,6 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, userID int64, chatID int64, lang
 		},
 	}
 
-	// Download PDFs concurrently to reduce total waiting time for 2+ files.
 	g, gctx := errgroup.WithContext(ctx)
 	sem := make(chan struct{}, 3)
 	for i, fi := range fileInfos {
@@ -2431,8 +2414,6 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, userID int64, chatID int64, lang
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			// pdftk/qpdf иногда ломаются на путях с не-ASCII символами (например кириллица),
-			// поэтому для merge сохраняем входные файлы с простыми ASCII именами.
 			safeName := fmt.Sprintf("merge_%03d.pdf", i+1)
 			log.Printf("Downloading file: %s (ID: %s)", fi.FileName, fi.FileID)
 
@@ -2463,7 +2444,6 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, userID int64, chatID int64, lang
 
 	log.Printf("Downloaded %d files, starting merge", len(pdfPaths))
 
-	// Проверить что файлы существуют и имеют правильный размер
 	for i, path := range pdfPaths {
 		stat, err := os.Stat(path)
 		if os.IsNotExist(err) {
@@ -2482,22 +2462,19 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, userID int64, chatID int64, lang
 		log.Printf("PDF file %d exists: %s (size: %d bytes)", i, path, stat.Size())
 	}
 
-	// Объединить PDF
 	outputPath := filepath.Join(tempDir, "merged_"+time.Now().Format("20060102_150405")+".pdf")
 	log.Printf("Output path: %s", outputPath)
 
 	var cmd *exec.Cmd
 	var toolName string
 
-	// Prefer pdftk (stable for concatenation). If not installed, fallback to qpdf.
 	if _, err := exec.LookPath("pdftk"); err == nil {
 		args := append(pdfPaths, "cat", "output", outputPath)
 		cmd = exec.Command("pdftk", args...)
 		toolName = "pdftk"
 		log.Printf("Using pdftk with args: %v", args)
 	} else if _, err := exec.LookPath("qpdf"); err == nil {
-		// Корректный синтаксис qpdf:
-		// qpdf --empty --pages file1.pdf 1-z file2.pdf 1-z -- output.pdf
+
 		args := []string{"--empty", "--pages"}
 		for _, path := range pdfPaths {
 			args = append(args, path, "1-z")
@@ -2528,7 +2505,6 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, userID int64, chatID int64, lang
 		return
 	}
 
-	// Проверить что выходной файл существует
 	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
 		log.Printf("Output file does not exist: %s", outputPath)
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
@@ -2541,7 +2517,6 @@ func (bh *Handlers) processMergePDF(b *bot.Bot, userID int64, chatID int64, lang
 
 	defer os.Remove(outputPath)
 
-	// Отправить результат
 	log.Printf("Sending merged PDF: %s", outputPath)
 	file, err := os.Open(outputPath)
 	if err != nil {
