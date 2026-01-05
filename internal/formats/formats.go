@@ -7,7 +7,6 @@ import (
 
 	"github.com/BatmanBruc/bat-bot-convetor/internal/i18n"
 	"github.com/BatmanBruc/bat-bot-convetor/internal/messages"
-	"github.com/BatmanBruc/bat-bot-convetor/internal/pricing"
 )
 
 type FormatCategory struct {
@@ -19,8 +18,6 @@ type FormatCategory struct {
 type FormatButton struct {
 	Text         string
 	CallbackData string
-	Credits      int
-	Heavy        bool
 }
 
 type BatchFile struct {
@@ -182,29 +179,6 @@ func GetFormatButtonsBySourceExt(sourceExt string, taskID string) []FormatButton
 	return GetFormatButtonsByList(GetTargetFormatsForSourceExt(sourceExt), taskID)
 }
 
-func GetFormatButtonsBySourceExtWithCredits(sourceExt string, taskID string, fileSize int64) []FormatButton {
-	targets := GetTargetFormatsForSourceExt(sourceExt)
-	buttons := make([]FormatButton, 0, len(targets))
-	for _, t := range targets {
-		credits, heavy := pricing.Credits(sourceExt, t, fileSize)
-		text := t
-		if credits > 0 {
-			if heavy {
-				text = t + " " + "★" + " " + fmt.Sprintf("(%d)", credits)
-			} else {
-				text = t + " " + fmt.Sprintf("(%d)", credits)
-			}
-		}
-		buttons = append(buttons, FormatButton{
-			Text:         text,
-			CallbackData: strings.ToLower(t) + "_for_" + taskID,
-			Credits:      credits,
-			Heavy:        heavy,
-		})
-	}
-	return buttons
-}
-
 func pick(lang i18n.Lang, ru string, en string) string {
 	if lang == i18n.RU {
 		return ru
@@ -212,65 +186,48 @@ func pick(lang i18n.Lang, ru string, en string) string {
 	return en
 }
 
-func GetButtonsForSourceExtWithCredits(sourceExt string, taskID string, fileSize int64, lang i18n.Lang) []FormatButton {
+func GetButtonsForSourceExt(sourceExt string, taskID string, lang i18n.Lang) []FormatButton {
 	sourceExt = normalizeExt(sourceExt)
 	if containsCaseInsensitive(imageFormats(), sourceExt) {
-		return getImageActionButtonsWithCredits(sourceExt, taskID, fileSize, lang)
+		return getImageActionButtons(sourceExt, taskID, lang)
 	}
 	if containsCaseInsensitive(videoFormats(), sourceExt) {
-		return getVideoActionButtonsWithCredits(sourceExt, taskID, fileSize, lang)
+		return getVideoActionButtons(sourceExt, taskID, lang)
 	}
 	if sourceExt == "pdf" {
-		return getPdfActionButtonsWithCredits(taskID, fileSize, lang)
+		return getPdfActionButtons(taskID)
 	}
-	return GetFormatButtonsBySourceExtWithCredits(sourceExt, taskID, fileSize)
+	return GetFormatButtonsBySourceExt(sourceExt, taskID)
 }
 
-func formatButtonText(label string, credits int, heavy bool) string {
-
-	return strings.TrimSpace(label)
-}
-
-func getImageActionButtonsWithCredits(sourceExt string, taskID string, fileSize int64, lang i18n.Lang) []FormatButton {
+func getImageActionButtons(sourceExt string, taskID string, lang i18n.Lang) []FormatButton {
 	buttons := make([]FormatButton, 0)
 	{
-		credits, heavy := pricing.Credits(sourceExt, "jpg", fileSize)
 		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(pick(lang, "🛒 Авито (JPG)", "🛒 Avito (JPG)"), credits, heavy),
+			Text:         strings.TrimSpace(pick(lang, "🛒 Авито (JPG)", "🛒 Avito (JPG)")),
 			CallbackData: fmt.Sprintf("pimg_avito_for_%s", taskID),
-			Credits:      credits,
-			Heavy:        heavy,
 		})
 		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(pick(lang, "📸 Instagram пост 1080×1080", "📸 Instagram post 1080×1080"), credits, heavy),
+			Text:         strings.TrimSpace(pick(lang, "📸 Instagram пост 1080×1080", "📸 Instagram post 1080×1080")),
 			CallbackData: fmt.Sprintf("pimg_instagram_feed_for_%s", taskID),
-			Credits:      credits,
-			Heavy:        heavy,
 		})
 		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(pick(lang, "📲 Instagram сторис 1080×1920", "📲 Instagram story 1080×1920"), credits, heavy),
+			Text:         strings.TrimSpace(pick(lang, "📲 Instagram сторис 1080×1920", "📲 Instagram story 1080×1920")),
 			CallbackData: fmt.Sprintf("pimg_instagram_story_for_%s", taskID),
-			Credits:      credits,
-			Heavy:        heavy,
 		})
 		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(pick(lang, "🟦 VK пост 1080×1080", "🟦 VK post 1080×1080"), credits, heavy),
+			Text:         strings.TrimSpace(pick(lang, "🟦 VK пост 1080×1080", "🟦 VK post 1080×1080")),
 			CallbackData: fmt.Sprintf("pimg_vk_square_for_%s", taskID),
-			Credits:      credits,
-			Heavy:        heavy,
 		})
 	}
-	buttons = append(buttons, GetFormatButtonsBySourceExtWithCredits(sourceExt, taskID, fileSize)...)
+	buttons = append(buttons, GetFormatButtonsBySourceExt(sourceExt, taskID)...)
 
 	resizePresets := []int{1080, 720}
 	for _, max := range resizePresets {
-		credits, heavy := pricing.Credits(sourceExt, sourceExt, fileSize)
 		label := fmt.Sprintf("%s %dpx", pick(lang, "📏", "📏"), max)
 		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(label, credits, heavy),
+			Text:         strings.TrimSpace(label),
 			CallbackData: fmt.Sprintf("imgr_%s_%d_for_%s", strings.ToLower(sourceExt), max, taskID),
-			Credits:      credits,
-			Heavy:        heavy,
 		})
 	}
 
@@ -284,110 +241,79 @@ func getImageActionButtonsWithCredits(sourceExt string, taskID string, fileSize 
 		{"webp", 70},
 	}
 	for _, ct := range compressTargets {
-		credits, heavy := pricing.Credits(sourceExt, ct.ext, fileSize)
 		label := fmt.Sprintf("%s %s %d%%", pick(lang, "🗜", "🗜"), strings.ToUpper(ct.ext), ct.quality)
 		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(label, credits, heavy),
+			Text:         strings.TrimSpace(label),
 			CallbackData: fmt.Sprintf("imgc_%s_%d_for_%s", strings.ToLower(ct.ext), ct.quality, taskID),
-			Credits:      credits,
-			Heavy:        heavy,
 		})
 	}
 
 	return buttons
 }
 
-func getVideoActionButtonsWithCredits(sourceExt string, taskID string, fileSize int64, lang i18n.Lang) []FormatButton {
+func getVideoActionButtons(sourceExt string, taskID string, lang i18n.Lang) []FormatButton {
 	buttons := make([]FormatButton, 0)
 	{
-		credits, heavy := pricing.Credits(sourceExt, "mp4", fileSize)
 		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(pick(lang, "🎵 TikTok 9:16 1080×1920", "🎵 TikTok 9:16 1080×1920"), credits, heavy),
+			Text:         strings.TrimSpace(pick(lang, "🎵 TikTok 9:16 1080×1920", "🎵 TikTok 9:16 1080×1920")),
 			CallbackData: fmt.Sprintf("pvid_tiktok_for_%s", taskID),
-			Credits:      credits,
-			Heavy:        heavy,
 		})
 		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(pick(lang, "📲 Reels 9:16 1080×1920", "📲 Reels 9:16 1080×1920"), credits, heavy),
+			Text:         strings.TrimSpace(pick(lang, "📲 Reels 9:16 1080×1920", "📲 Reels 9:16 1080×1920")),
 			CallbackData: fmt.Sprintf("pvid_reels_for_%s", taskID),
-			Credits:      credits,
-			Heavy:        heavy,
 		})
 		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(pick(lang, "▶️ Shorts 9:16 1080×1920", "▶️ Shorts 9:16 1080×1920"), credits, heavy),
+			Text:         strings.TrimSpace(pick(lang, "▶️ Shorts 9:16 1080×1920", "▶️ Shorts 9:16 1080×1920")),
 			CallbackData: fmt.Sprintf("pvid_shorts_for_%s", taskID),
-			Credits:      credits,
-			Heavy:        heavy,
 		})
 		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(pick(lang, "🟦 VK Clips 9:16 1080×1920", "🟦 VK Clips 9:16 1080×1920"), credits, heavy),
+			Text:         strings.TrimSpace(pick(lang, "🟦 VK Clips 9:16 1080×1920", "🟦 VK Clips 9:16 1080×1920")),
 			CallbackData: fmt.Sprintf("pvid_vk_clips_for_%s", taskID),
-			Credits:      credits,
-			Heavy:        heavy,
 		})
 		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(pick(lang, "📺 YouTube 16:9 1920×1080", "📺 YouTube 16:9 1920×1080"), credits, heavy),
+			Text:         strings.TrimSpace(pick(lang, "📺 YouTube 16:9 1920×1080", "📺 YouTube 16:9 1920×1080")),
 			CallbackData: fmt.Sprintf("pvid_youtube_1080p_for_%s", taskID),
-			Credits:      credits,
-			Heavy:        heavy,
 		})
 	}
-	buttons = append(buttons, GetFormatButtonsBySourceExtWithCredits(sourceExt, taskID, fileSize)...)
+	buttons = append(buttons, GetFormatButtonsBySourceExt(sourceExt, taskID)...)
 
 	resizeHeights := []int{720, 480}
 	for _, h := range resizeHeights {
-		credits, heavy := pricing.Credits(sourceExt, "mp4", fileSize)
 		label := fmt.Sprintf("%s %dp", pick(lang, "📏", "📏"), h)
 		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(label, credits, heavy),
+			Text:         strings.TrimSpace(label),
 			CallbackData: fmt.Sprintf("vidr_mp4_%d_for_%s", h, taskID),
-			Credits:      credits,
-			Heavy:        heavy,
 		})
 	}
 
 	crfPresets := []int{28, 35}
 	for _, crf := range crfPresets {
-		credits, heavy := pricing.Credits(sourceExt, "mp4", fileSize)
 		label := fmt.Sprintf("%s MP4 CRF %d", pick(lang, "🗜", "🗜"), crf)
 		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(label, credits, heavy),
+			Text:         strings.TrimSpace(label),
 			CallbackData: fmt.Sprintf("vidc_mp4_%d_for_%s", crf, taskID),
-			Credits:      credits,
-			Heavy:        heavy,
 		})
 	}
 
 	gifHeights := []int{480, 320}
 	for _, h := range gifHeights {
-		credits, heavy := pricing.Credits(sourceExt, "gif", fileSize)
 		label := fmt.Sprintf("%s GIF %dp", pick(lang, "🎞", "🎞"), h)
 		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(label, credits, heavy),
+			Text:         strings.TrimSpace(label),
 			CallbackData: fmt.Sprintf("vidg_gif_%d_for_%s", h, taskID),
-			Credits:      credits,
-			Heavy:        heavy,
 		})
 	}
 
 	return buttons
 }
 
-func getPdfActionButtonsWithCredits(taskID string, fileSize int64, lang i18n.Lang) []FormatButton {
-	buttons := make([]FormatButton, 0)
-	{
-		credits, heavy := pricing.Credits("pdf", "txt", fileSize)
-		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText("TXT", credits, heavy),
-			CallbackData: "txt_for_" + taskID,
-			Credits:      credits,
-			Heavy:        heavy,
-		})
+func getPdfActionButtons(taskID string) []FormatButton {
+	return []FormatButton{
+		{Text: "TXT", CallbackData: "txt_for_" + taskID},
 	}
-	return buttons
 }
 
-func GetBatchButtonsBySourceExtWithCredits(sourceExt string, taskID string, files []BatchFile, lang i18n.Lang) []FormatButton {
+func GetBatchButtonsBySourceExt(sourceExt string, taskID string, files []BatchFile, lang i18n.Lang) []FormatButton {
 	sourceExt = normalizeExt(sourceExt)
 	if len(files) == 0 {
 		return nil
@@ -400,21 +326,10 @@ func GetBatchButtonsBySourceExtWithCredits(sourceExt string, taskID string, file
 
 	buttons := make([]FormatButton, 0, len(targets))
 	for _, t := range targets {
-		total := 0
-		heavyAny := false
-		for _, f := range files {
-			c, h := pricing.Credits(sourceExt, t, f.FileSize)
-			total += c
-			if h {
-				heavyAny = true
-			}
-		}
 		label := strings.ToUpper(t)
 		buttons = append(buttons, FormatButton{
-			Text:         formatButtonText(label, total, heavyAny),
+			Text:         strings.TrimSpace(label),
 			CallbackData: strings.ToLower(t) + "_for_" + taskID,
-			Credits:      total,
-			Heavy:        heavyAny,
 		})
 	}
 	return buttons

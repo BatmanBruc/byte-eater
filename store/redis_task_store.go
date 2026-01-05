@@ -90,7 +90,7 @@ func (s *RedisTaskStore) GetActiveTask(userID int64) (*types.Task, error) {
 	}
 
 	for _, task := range tasks {
-		if task.State == types.StateProcessing || task.State == types.StateWaitingFile {
+		if task.State == types.StateProcessing {
 			return task, nil
 		}
 	}
@@ -194,18 +194,14 @@ func (s *RedisTaskStore) SetProcessingFile(userID int64, fileID, fileName string
 	return task, nil
 }
 
-func (s *RedisTaskStore) SetTaskReady(taskID, resultFileID string) error {
+func (s *RedisTaskStore) SetTaskReady(taskID string) error {
 	task, err := s.GetTask(taskID)
 	if err != nil {
 		return err
 	}
 
 	task.State = types.StateReady
-	task.ResultFileID = ""
-	task.ResultPath = ""
 	task.UpdatedAt = time.Now()
-
-	task.ResultFileID = resultFileID
 
 	return s.UpdateTask(task)
 }

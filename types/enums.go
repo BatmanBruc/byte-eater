@@ -3,12 +3,10 @@ package types
 type ChatState string
 
 const (
-	StateStart       ChatState = "start"
-	StateChooseExt   ChatState = "choose_ext"
-	StateWaitingFile ChatState = "waiting_file"
-	StateProcessing  ChatState = "processing"
-	StateReady       ChatState = "ready"
-	StateError       ChatState = "error"
+	StateChooseExt  ChatState = "choose_ext"
+	StateProcessing ChatState = "processing"
+	StateReady      ChatState = "ready"
+	StateError      ChatState = "error"
 )
 
 const (

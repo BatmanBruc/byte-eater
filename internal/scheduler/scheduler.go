@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,7 +13,6 @@ import (
 	"github.com/BatmanBruc/bat-bot-convetor/internal/converter"
 	"github.com/BatmanBruc/bat-bot-convetor/internal/i18n"
 	"github.com/BatmanBruc/bat-bot-convetor/internal/messages"
-	"github.com/BatmanBruc/bat-bot-convetor/internal/pricing"
 	"github.com/BatmanBruc/bat-bot-convetor/types"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -311,7 +309,6 @@ func (s *Scheduler) isHeavyTask(task *types.Task) bool {
 		return false
 	}
 
-	fileSize := int64(0)
 	if task.Options != nil {
 		if v, ok := task.Options["is_heavy"]; ok {
 			switch t := v.(type) {
@@ -321,24 +318,8 @@ func (s *Scheduler) isHeavyTask(task *types.Task) bool {
 				return strings.EqualFold(strings.TrimSpace(t), "true")
 			}
 		}
-		if v, ok := task.Options["file_size"]; ok {
-			switch t := v.(type) {
-			case int64:
-				fileSize = t
-			case int:
-				fileSize = int64(t)
-			case float64:
-				fileSize = int64(t)
-			case string:
-				if n, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64); err == nil {
-					fileSize = n
-				}
-			}
-		}
 	}
-
-	_, heavy := pricing.Credits(task.OriginalExt, task.TargetExt, fileSize)
-	return heavy
+	return false
 }
 
 func (s *Scheduler) decrementQueueAndUpdateMessages() {
@@ -440,12 +421,9 @@ func (s *Scheduler) processTask(task *types.Task) error {
 		return err
 	}
 
-	resultFileID := ""
-	if msg != nil && msg.Document != nil {
-		resultFileID = msg.Document.FileID
-	}
+	_ = msg
 
-	if err := s.store.SetTaskReady(task.ID, resultFileID); err != nil {
+	if err := s.store.SetTaskReady(task.ID); err != nil {
 		log.Printf("Error setting ready for task %s: %v", task.ID, err)
 
 		return err
@@ -477,25 +455,6 @@ func (s *Scheduler) resultCaption(task *types.Task, fileName string) string {
 	}
 	if unlimited {
 		return caption + "\n\n" + messages.PlanUnlimitedLine(lang)
-	}
-
-	rem := 0
-	ok := false
-	if v, exists := task.Options["credits_remaining"]; exists {
-		switch t := v.(type) {
-		case int:
-			rem = t
-			ok = true
-		case int64:
-			rem = int(t)
-			ok = true
-		case float64:
-			rem = int(t)
-			ok = true
-		}
-	}
-	if ok {
-		return caption + "\n\n" + messages.CreditsRemainingLine(lang, rem)
 	}
 	return caption
 }

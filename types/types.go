@@ -21,20 +21,18 @@ type Session struct {
 }
 
 type Task struct {
-	ID           string                 `json:"id"`
-	UserID       int64                  `json:"user_id"`
-	State        ChatState              `json:"state"`
-	FileID       string                 `json:"file_id,omitempty"`
-	FileName     string                 `json:"file_name,omitempty"`
-	OriginalExt  string                 `json:"original_ext,omitempty"`
-	TargetExt    string                 `json:"target_ext,omitempty"`
-	Options      map[string]interface{} `json:"options,omitempty"`
-	ResultPath   string                 `json:"result_path,omitempty"`
-	ResultFileID string                 `json:"result_file_id,omitempty"`
-	Error        string                 `json:"error,omitempty"`
-	CreatedAt    time.Time              `json:"created_at"`
-	UpdatedAt    time.Time              `json:"updated_at"`
-	ExpiresAt    time.Time              `json:"expires_at"`
+	ID          string                 `json:"id"`
+	UserID      int64                  `json:"user_id"`
+	State       ChatState              `json:"state"`
+	FileID      string                 `json:"file_id,omitempty"`
+	FileName    string                 `json:"file_name,omitempty"`
+	OriginalExt string                 `json:"original_ext,omitempty"`
+	TargetExt   string                 `json:"target_ext,omitempty"`
+	Options     map[string]interface{} `json:"options,omitempty"`
+	Error       string                 `json:"error,omitempty"`
+	CreatedAt   time.Time              `json:"created_at"`
+	UpdatedAt   time.Time              `json:"updated_at"`
+	ExpiresAt   time.Time              `json:"expires_at"`
 }
 
 type UserStateStore interface {
@@ -56,7 +54,7 @@ type TaskStore interface {
 	SetProcessingFile(userID int64, fileID, fileName string, fileSize int64) (*Task, error)
 	GetProcessingTasks() ([]*Task, error)
 
-	SetTaskReady(taskID, resultFileID string) error
+	SetTaskReady(taskID string) error
 	SetTaskError(taskID string, errorMsg string) error
 	CleanExpiredTasks() error
 }
